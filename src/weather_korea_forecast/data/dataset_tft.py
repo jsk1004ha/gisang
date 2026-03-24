@@ -90,6 +90,7 @@ def build_dataset_bundle(
     backend: str = "fallback_torch",
 ) -> PreparedDatasetBundle:
     training_table = training_table.copy()
+    training_table["station_id"] = training_table["station_id"].astype(str)
     training_table["datetime"] = pd.to_datetime(training_table["datetime"], utc=True)
     if backend == "pytorch_forecasting":
         training_table = training_table.sort_values(["station_id", "datetime"]).reset_index(drop=True)

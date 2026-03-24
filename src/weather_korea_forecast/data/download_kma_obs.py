@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 
 from weather_korea_forecast.utils.config import load_yaml
+from weather_korea_forecast.utils.env import load_dotenv
 from weather_korea_forecast.utils.io import write_table
 from weather_korea_forecast.utils.logger import get_logger
 from weather_korea_forecast.utils.paths import resolve_path
@@ -55,6 +56,7 @@ SERVICE_SPECS = {
 
 
 def download_kma_observations(config: dict[str, Any]) -> pd.DataFrame:
+    load_dotenv()
     service_name = config["service"]
     if service_name not in SERVICE_SPECS:
         raise ValueError(f"Unsupported KMA service: {service_name}")

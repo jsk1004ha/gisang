@@ -43,6 +43,7 @@ temp/
 *.pt
 *.pth
 data/artifacts/
+result/
 
 # Local data cache
 data/raw/

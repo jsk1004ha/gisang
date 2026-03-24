@@ -32,11 +32,13 @@ def generate_forecast(
     training_table["datetime"] = pd.to_datetime(training_table["datetime"], utc=True)
     bundle = build_dataset_bundle(training_table, data_config, backend=model_config["model"].get("backend", "fallback_torch"))
 
+    normalized_station_id = str(station_id)
+
     if model_config["model"].get("backend") == "pytorch_forecasting":
         full_frame = pd.concat([bundle.train_frame, bundle.val_frame, bundle.test_frame], ignore_index=True)
     else:
         full_frame = training_table
-    station_frame = full_frame.loc[full_frame["station_id"] == station_id].copy()
+    station_frame = full_frame.loc[full_frame["station_id"].astype(str) == normalized_station_id].copy()
     init_time = _ensure_utc_timestamp(forecast_init_time)
     history_frame = station_frame.loc[station_frame["datetime"] <= init_time].copy()
     encoder_frame = history_frame.tail(bundle.encoder_length).copy()
@@ -61,7 +63,7 @@ def generate_forecast(
             "decoder_known": torch.tensor(decoder_frame[bundle.decoder_columns].to_numpy(dtype="float32")).unsqueeze(0),
             "static_real": static_real.unsqueeze(0),
             "target": torch.zeros((1, bundle.prediction_length, len(bundle.target_columns)), dtype=torch.float32),
-            "station_id": [station_id],
+            "station_id": [normalized_station_id],
             "prediction_start": [future_timestamps[0]],
         }
         predictor = PersistenceBaseline(seasonal_period=model_config["model"].get("seasonal_period"))
@@ -74,7 +76,7 @@ def generate_forecast(
             encoder_frame=encoder_frame,
             decoder_frame=decoder_frame,
             future_timestamps=future_timestamps,
-            station_id=station_id,
+            station_id=normalized_station_id,
         )
     else:
         encoder_frame = bundle.scaler.transform(encoder_frame, [column for column in scaling_columns if column in encoder_frame.columns])
@@ -84,7 +86,7 @@ def generate_forecast(
             "decoder_known": torch.tensor(decoder_frame[bundle.decoder_columns].to_numpy(dtype="float32")).unsqueeze(0),
             "static_real": static_real.unsqueeze(0),
             "target": torch.zeros((1, bundle.prediction_length, len(bundle.target_columns)), dtype=torch.float32),
-            "station_id": [station_id],
+            "station_id": [normalized_station_id],
             "prediction_start": [future_timestamps[0]],
         }
         wrapper = TFTModelWrapper.load(experiment_path / "model.pt", bundle)
@@ -98,7 +100,7 @@ def generate_forecast(
             prediction_value = float(bundle.scaler.inverse_values(target_column, prediction_value))
         points.append(
             ForecastPoint(
-                station_id=station_id,
+                station_id=normalized_station_id,
                 timestamp=str(future_timestamps[horizon_index]),
                 prediction=prediction_value,
             )

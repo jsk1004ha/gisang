@@ -49,10 +49,22 @@ def build_training_table(config: dict) -> pd.DataFrame:
     if "wind_speed" in merged.columns:
         merged["obs_wind_speed"] = merged["wind_speed"]
 
+    merged = _fill_continuous_feature_gaps(merged)
     merged = assign_time_splits(merged, config["split"])
     merged = merged.sort_values(["station_id", "datetime"]).reset_index(drop=True)
     merged["quality_flag"] = merged["quality_flag"].fillna("")
     return merged
+
+
+def _fill_continuous_feature_gaps(df: pd.DataFrame) -> pd.DataFrame:
+    frame = df.copy()
+    candidate_columns = [column for column in frame.columns if column.startswith("era5_") or column.startswith("obs_")]
+    for column in candidate_columns:
+        frame[column] = (
+            frame.groupby("station_id")[column]
+            .transform(lambda series: series.astype(float).interpolate(limit=12, limit_direction="both").ffill().bfill())
+        )
+    return frame
 
 
 def main() -> None:

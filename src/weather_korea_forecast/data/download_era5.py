@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from weather_korea_forecast.utils.config import load_yaml
+from weather_korea_forecast.utils.env import load_dotenv
 from weather_korea_forecast.utils.logger import get_logger
 from weather_korea_forecast.utils.paths import resolve_path
 
@@ -12,6 +13,7 @@ LOGGER = get_logger(__name__)
 
 
 def download_or_register_era5(config: dict) -> Path:
+    load_dotenv()
     output_path = resolve_path(config["output_path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
