@@ -1,0 +1,1 @@
+"""Weather Korea Forecast package."""

@@ -1,0 +1,11 @@
+metrics:
+  point:
+    - rmse
+    - mae
+    - bias
+    - mape
+  breakdowns:
+    - station_id
+    - region
+    - season
+    - horizon_step

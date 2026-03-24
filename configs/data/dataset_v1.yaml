@@ -1,0 +1,58 @@
+paths:
+  observation_csv: data/raw/asos/seoul_observations.csv
+  era5_csv: data/raw/era5/seoul_grid.csv
+  station_metadata_csv: data/raw/metadata/stations.csv
+  output_training_table: data/processed/dataset_v1/training_table.csv
+timezone:
+  source: Asia/Seoul
+targets:
+  - temp
+observation_columns:
+  station_id: station_id
+  datetime: datetime
+  temp: temp
+  humidity: humidity
+  pressure: pressure
+  wind_speed: wind_speed
+  precipitation: precipitation
+  quality_flag: quality_flag
+era5:
+  extraction_mode: nearest
+features:
+  encoder_continuous:
+    - obs_temp
+    - era5_t2m
+    - era5_sp
+    - era5_u10
+    - era5_v10
+    - era5_tp
+    - hour_sin
+    - hour_cos
+    - doy_sin
+    - doy_cos
+  decoder_known:
+    - hour_sin
+    - hour_cos
+    - doy_sin
+    - doy_cos
+  static_real:
+    - lat
+    - lon
+    - elevation
+window:
+  encoder_length: 72
+  prediction_length: 6
+split:
+  train_end: 2023-12-31T23:00:00Z
+  val_end: 2024-12-31T23:00:00Z
+  test_end: 2025-12-31T23:00:00Z
+scaling:
+  mode: global
+  columns:
+    - obs_temp
+    - era5_t2m
+    - era5_sp
+    - era5_u10
+    - era5_v10
+    - era5_tp
+    - target_temp

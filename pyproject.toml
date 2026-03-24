@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "weather-korea-forecast"
+version = "0.1.0"
+description = "Korean station-level weather forecasting pipeline with ERA5 and TFT-oriented training"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "PyYAML>=6.0",
+  "torch>=2.2",
+  "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+tft = [
+  "lightning>=2.2",
+  "pytorch-forecasting>=1.0",
+  "xarray>=2024.1.0",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

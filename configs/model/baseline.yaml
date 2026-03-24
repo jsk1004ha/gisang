@@ -1,0 +1,6 @@
+model:
+  name: persistence_v1
+  type: persistence
+  seasonal_period: null
+  target_columns:
+    - target_temp
