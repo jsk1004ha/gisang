@@ -53,16 +53,17 @@ class TrainResult:
 
 
 class TFTModelWrapper:
-    def __init__(self, model: nn.Module, backend: str, config: dict[str, Any]) -> None:
+    def __init__(self, model: nn.Module, backend: str, config: dict[str, Any], bundle: Any | None = None) -> None:
         self.model = model
         self.backend = backend
         self.config = config
+        self.bundle = bundle
 
     @classmethod
     def from_dataset_bundle(cls, bundle: Any, model_config: dict[str, Any]) -> "TFTModelWrapper":
         backend = model_config["model"].get("backend", "fallback_torch")
         if backend == "pytorch_forecasting":
-            return cls(_build_pytorch_forecasting_model(bundle, model_config), backend, model_config)
+            return cls(_build_pytorch_forecasting_model(bundle, model_config), backend, model_config, bundle=bundle)
 
         model = FallbackSeqForecaster(
             encoder_length=bundle.encoder_length,
@@ -74,7 +75,7 @@ class TFTModelWrapper:
             hidden_size=int(model_config["model"].get("hidden_size", 32)),
             dropout=float(model_config["model"].get("dropout", 0.1)),
         )
-        return cls(model=model, backend=backend, config=model_config)
+        return cls(model=model, backend=backend, config=model_config, bundle=bundle)
 
     def fit(
         self,
@@ -86,7 +87,14 @@ class TFTModelWrapper:
         early_stopping_patience: int = 3,
     ) -> TrainResult:
         if self.backend == "pytorch_forecasting":
-            return _fit_with_lightning(self.model, train_loader, val_loader, max_epochs=max_epochs, device=device)
+            return _fit_with_lightning(
+                self.model,
+                train_loader,
+                val_loader,
+                max_epochs=max_epochs,
+                device=device,
+                early_stopping_patience=early_stopping_patience,
+            )
 
         self.model.to(device)
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
@@ -115,7 +123,7 @@ class TFTModelWrapper:
 
     def predict_loader(self, loader: Any, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
         if self.backend == "pytorch_forecasting":
-            return _predict_with_lightning(self.model, loader)
+            return _predict_with_lightning(self.model, loader, self.bundle)
 
         self.model.to(device)
         self.model.eval()
@@ -198,17 +206,71 @@ def _build_pytorch_forecasting_model(bundle: Any, model_config: dict[str, Any]) 
     )
 
 
-def _fit_with_lightning(model: Any, train_loader: Any, val_loader: Any, max_epochs: int, device: str) -> TrainResult:
+def _fit_with_lightning(
+    model: Any,
+    train_loader: Any,
+    val_loader: Any,
+    max_epochs: int,
+    device: str,
+    early_stopping_patience: int,
+) -> TrainResult:
     try:
         import lightning as L  # type: ignore
+        from lightning.pytorch.callbacks import EarlyStopping  # type: ignore
     except ImportError as exc:
         raise RuntimeError("lightning is not installed.") from exc
 
-    trainer = L.Trainer(max_epochs=max_epochs, accelerator="cpu" if device == "cpu" else "auto", enable_checkpointing=False)
+    callbacks = [EarlyStopping(monitor="val_loss", patience=early_stopping_patience, mode="min")]
+    trainer = L.Trainer(
+        max_epochs=max_epochs,
+        accelerator="cpu" if device == "cpu" else "auto",
+        enable_checkpointing=False,
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        callbacks=callbacks,
+    )
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-    return TrainResult(history=[], best_val_loss=float("nan"))
+    val_loss = trainer.callback_metrics.get("val_loss")
+    best_val_loss = float(val_loss.detach().cpu()) if val_loss is not None else float("nan")
+    return TrainResult(history=[], best_val_loss=best_val_loss)
 
 
-def _predict_with_lightning(model: Any, loader: Any) -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
-    prediction = model.predict(loader, mode="prediction")
-    raise NotImplementedError("Lightning prediction collation is not implemented in this scaffold.")
+def _predict_with_lightning(model: Any, loader: Any, bundle: Any) -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
+    prediction = model.predict(
+        loader,
+        return_index=True,
+        return_y=True,
+        trainer_kwargs={
+            "accelerator": "cpu",
+            "devices": 1,
+            "logger": False,
+            "enable_checkpointing": False,
+            "enable_progress_bar": False,
+            "enable_model_summary": False,
+        },
+    )
+    output = prediction.output
+    if output.ndim == 2:
+        output = output.unsqueeze(-1)
+
+    target = prediction.y[0]
+    if target.ndim == 2:
+        target = target.unsqueeze(-1)
+
+    index_frame = prediction.index.copy()
+    if bundle is None:
+        raise RuntimeError("Dataset bundle is required for pytorch_forecasting predictions.")
+
+    time_lookup = (
+        bundle.test_frame[["station_id", "time_idx", "datetime"]]
+        .drop_duplicates()
+        .rename(columns={"time_idx": "prediction_time_idx", "datetime": "prediction_start"})
+    )
+    index_frame = index_frame.rename(columns={"time_idx": "prediction_time_idx"})
+    index_frame = index_frame.merge(time_lookup, on=["station_id", "prediction_time_idx"], how="left")
+    metadata = {
+        "station_id": index_frame["station_id"].tolist(),
+        "prediction_start": index_frame["prediction_start"].astype(str).tolist(),
+    }
+    return output.cpu(), target.cpu(), metadata

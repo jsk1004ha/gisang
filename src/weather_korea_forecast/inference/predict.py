@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 
-from weather_korea_forecast.data.dataset_tft import build_dataset_bundle
+from weather_korea_forecast.data.dataset_tft import SlidingWindowDataset, build_dataset_bundle
 from weather_korea_forecast.features.time_features import add_time_features
 from weather_korea_forecast.inference.schemas import ForecastPoint
 from weather_korea_forecast.models.baselines import PersistenceBaseline
@@ -32,9 +32,14 @@ def generate_forecast(
     training_table["datetime"] = pd.to_datetime(training_table["datetime"], utc=True)
     bundle = build_dataset_bundle(training_table, data_config, backend=model_config["model"].get("backend", "fallback_torch"))
 
-    station_frame = training_table.loc[training_table["station_id"] == station_id].copy()
+    if model_config["model"].get("backend") == "pytorch_forecasting":
+        full_frame = pd.concat([bundle.train_frame, bundle.val_frame, bundle.test_frame], ignore_index=True)
+    else:
+        full_frame = training_table
+    station_frame = full_frame.loc[full_frame["station_id"] == station_id].copy()
     init_time = _ensure_utc_timestamp(forecast_init_time)
-    encoder_frame = station_frame.loc[station_frame["datetime"] <= init_time].tail(bundle.encoder_length).copy()
+    history_frame = station_frame.loc[station_frame["datetime"] <= init_time].copy()
+    encoder_frame = history_frame.tail(bundle.encoder_length).copy()
     if len(encoder_frame) < bundle.encoder_length:
         raise ValueError("Not enough history available for requested forecast window.")
 
@@ -47,21 +52,41 @@ def generate_forecast(
     decoder_frame = pd.DataFrame({"datetime": future_timestamps})
     decoder_frame = add_time_features(decoder_frame)
     scaling_columns = bundle.metadata.get("scaling_columns", [])
-    encoder_frame = bundle.scaler.transform(encoder_frame, [column for column in scaling_columns if column in encoder_frame.columns])
-    static_real = torch.tensor(encoder_frame.iloc[0][bundle.static_columns].to_numpy(dtype="float32")) if bundle.static_columns else torch.zeros(0)
-    batch = {
-        "encoder_cont": torch.tensor(encoder_frame[bundle.encoder_columns].to_numpy(dtype="float32")).unsqueeze(0),
-        "decoder_known": torch.tensor(decoder_frame[bundle.decoder_columns].to_numpy(dtype="float32")).unsqueeze(0),
-        "static_real": static_real.unsqueeze(0),
-        "target": torch.zeros((1, bundle.prediction_length, len(bundle.target_columns)), dtype=torch.float32),
-        "station_id": [station_id],
-        "prediction_start": [future_timestamps[0]],
-    }
 
     if model_config["model"]["type"] == "persistence":
+        encoder_frame = bundle.scaler.transform(encoder_frame, [column for column in scaling_columns if column in encoder_frame.columns])
+        static_real = torch.tensor(encoder_frame.iloc[0][bundle.static_columns].to_numpy(dtype="float32")) if bundle.static_columns else torch.zeros(0)
+        batch = {
+            "encoder_cont": torch.tensor(encoder_frame[bundle.encoder_columns].to_numpy(dtype="float32")).unsqueeze(0),
+            "decoder_known": torch.tensor(decoder_frame[bundle.decoder_columns].to_numpy(dtype="float32")).unsqueeze(0),
+            "static_real": static_real.unsqueeze(0),
+            "target": torch.zeros((1, bundle.prediction_length, len(bundle.target_columns)), dtype=torch.float32),
+            "station_id": [station_id],
+            "prediction_start": [future_timestamps[0]],
+        }
         predictor = PersistenceBaseline(seasonal_period=model_config["model"].get("seasonal_period"))
         prediction = predictor.predict_batch(batch)
+    elif model_config["model"].get("backend") == "pytorch_forecasting":
+        prediction = _predict_with_tft_bundle(
+            experiment_path=experiment_path,
+            bundle=bundle,
+            station_frame=station_frame,
+            encoder_frame=encoder_frame,
+            decoder_frame=decoder_frame,
+            future_timestamps=future_timestamps,
+            station_id=station_id,
+        )
     else:
+        encoder_frame = bundle.scaler.transform(encoder_frame, [column for column in scaling_columns if column in encoder_frame.columns])
+        static_real = torch.tensor(encoder_frame.iloc[0][bundle.static_columns].to_numpy(dtype="float32")) if bundle.static_columns else torch.zeros(0)
+        batch = {
+            "encoder_cont": torch.tensor(encoder_frame[bundle.encoder_columns].to_numpy(dtype="float32")).unsqueeze(0),
+            "decoder_known": torch.tensor(decoder_frame[bundle.decoder_columns].to_numpy(dtype="float32")).unsqueeze(0),
+            "static_real": static_real.unsqueeze(0),
+            "target": torch.zeros((1, bundle.prediction_length, len(bundle.target_columns)), dtype=torch.float32),
+            "station_id": [station_id],
+            "prediction_start": [future_timestamps[0]],
+        }
         wrapper = TFTModelWrapper.load(experiment_path / "model.pt", bundle)
         prediction, _, _ = wrapper.predict_loader([batch])
 
@@ -86,6 +111,63 @@ def _ensure_utc_timestamp(value) -> pd.Timestamp:
     if timestamp.tzinfo is None:
         return timestamp.tz_localize("UTC")
     return timestamp.tz_convert("UTC")
+
+
+def _predict_with_tft_bundle(
+    experiment_path: Path,
+    bundle,
+    station_frame: pd.DataFrame,
+    encoder_frame: pd.DataFrame,
+    decoder_frame: pd.DataFrame,
+    future_timestamps: pd.DatetimeIndex,
+    station_id: str,
+) -> torch.Tensor:
+    from pytorch_forecasting import TimeSeriesDataSet
+
+    wrapper = TFTModelWrapper.load(experiment_path / "model.pt", bundle)
+    history = station_frame.sort_values("datetime").copy()
+    if "time_idx" not in history.columns:
+        history["time_idx"] = range(len(history))
+
+    base_row = encoder_frame.iloc[-1].copy()
+    future_rows: list[dict[str, object]] = []
+    last_time_idx = int(encoder_frame["time_idx"].iloc[-1])
+    for offset, timestamp in enumerate(future_timestamps, start=1):
+        row = base_row.to_dict()
+        row["station_id"] = station_id
+        row["datetime"] = timestamp
+        row["time_idx"] = last_time_idx + offset
+        for column in bundle.target_columns:
+            row[column] = base_row[column]
+        for column in bundle.unknown_columns:
+            row[column] = base_row[column]
+        for column in bundle.decoder_columns:
+            row[column] = float(decoder_frame.iloc[offset - 1][column])
+        future_rows.append(row)
+
+    prediction_frame = pd.concat([encoder_frame.copy(), pd.DataFrame(future_rows)], ignore_index=True, sort=False)
+    prediction_frame["time_idx"] = prediction_frame["time_idx"].astype(int)
+    prediction_dataset = TimeSeriesDataSet.from_dataset(
+        bundle.train_dataset,
+        prediction_frame,
+        predict=True,
+        stop_randomization=True,
+    )
+    prediction_loader = prediction_dataset.to_dataloader(train=False, batch_size=1, num_workers=0)
+    prediction_result = wrapper.model.predict(
+        prediction_loader,
+        trainer_kwargs={
+            "accelerator": "cpu",
+            "devices": 1,
+            "logger": False,
+            "enable_checkpointing": False,
+            "enable_progress_bar": False,
+            "enable_model_summary": False,
+        },
+    )
+    if prediction_result.ndim == 2:
+        prediction_result = prediction_result.unsqueeze(-1)
+    return prediction_result.cpu()
 
 
 def main() -> None:

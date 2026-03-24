@@ -1,0 +1,8 @@
+service: aws_minutely
+output_path: data/raw/aws/seoul_20250322_20250324.csv
+stations:
+  - 108
+start: 2025-03-22T00:00:00+09:00
+end: 2025-03-24T23:59:00+09:00
+data_type: JSON
+page_size: 999

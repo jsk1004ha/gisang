@@ -21,6 +21,7 @@ class PreparedDatasetBundle:
     scaler: ColumnScaler
     encoder_columns: list[str]
     decoder_columns: list[str]
+    unknown_columns: list[str]
     target_columns: list[str]
     static_columns: list[str]
     encoder_length: int
@@ -90,8 +91,12 @@ def build_dataset_bundle(
 ) -> PreparedDatasetBundle:
     training_table = training_table.copy()
     training_table["datetime"] = pd.to_datetime(training_table["datetime"], utc=True)
+    if backend == "pytorch_forecasting":
+        training_table = training_table.sort_values(["station_id", "datetime"]).reset_index(drop=True)
+        training_table["time_idx"] = training_table.groupby("station_id").cumcount()
     encoder_columns = config["features"]["encoder_continuous"]
     decoder_columns = config["features"]["decoder_known"]
+    unknown_columns = [column for column in encoder_columns if column not in decoder_columns]
     static_columns = config["features"].get("static_real", [])
     target_columns = [f"target_{target}" if not target.startswith("target_") else target for target in config["targets"]]
     encoder_length = int(config["window"]["encoder_length"])
@@ -112,6 +117,7 @@ def build_dataset_bundle(
             split_frames=split_frames,
             encoder_columns=encoder_columns,
             decoder_columns=decoder_columns,
+            unknown_columns=unknown_columns,
             static_columns=static_columns,
             target_columns=target_columns,
             encoder_length=encoder_length,
@@ -139,6 +145,7 @@ def build_dataset_bundle(
         scaler=scaler,
         encoder_columns=encoder_columns,
         decoder_columns=decoder_columns,
+        unknown_columns=unknown_columns,
         target_columns=target_columns,
         static_columns=static_columns,
         encoder_length=encoder_length,
@@ -152,6 +159,7 @@ def _build_pytorch_forecasting_bundle(
     split_frames: dict[str, pd.DataFrame],
     encoder_columns: list[str],
     decoder_columns: list[str],
+    unknown_columns: list[str],
     static_columns: list[str],
     target_columns: list[str],
     encoder_length: int,
@@ -167,9 +175,6 @@ def _build_pytorch_forecasting_bundle(
     val_frame = split_frames["val"].copy()
     test_frame = split_frames["test"].copy()
 
-    for frame in (train_frame, val_frame, test_frame):
-        frame["time_idx"] = frame.groupby("station_id").cumcount()
-
     target_column = target_columns[0]
     common_kwargs = dict(
         time_idx="time_idx",
@@ -179,7 +184,7 @@ def _build_pytorch_forecasting_bundle(
         max_prediction_length=prediction_length,
         static_reals=static_columns,
         time_varying_known_reals=decoder_columns,
-        time_varying_unknown_reals=list(dict.fromkeys(encoder_columns)),
+        time_varying_unknown_reals=unknown_columns,
         allow_missing_timesteps=False,
     )
     train_dataset = TimeSeriesDataSet(train_frame, **common_kwargs)
@@ -195,6 +200,7 @@ def _build_pytorch_forecasting_bundle(
         scaler=scaler,
         encoder_columns=encoder_columns,
         decoder_columns=decoder_columns,
+        unknown_columns=unknown_columns,
         target_columns=target_columns,
         static_columns=static_columns,
         encoder_length=encoder_length,
