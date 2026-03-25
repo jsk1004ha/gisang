@@ -1,12 +1,10 @@
 experiment:
-  name: real_q1_2025_multitarget
+  name: real_2024q4_2025q1_richer_multitarget
 training:
   batch_size: 64
   max_epochs: 30
   early_stopping_patience: 5
   num_workers: 0
   device: cuda
-  # Optional warm-start checkpoint for continued training.
-  # resume_from: data/artifacts/experiments/best/model.pt
 artifacts:
   root_dir: data/artifacts/experiments
