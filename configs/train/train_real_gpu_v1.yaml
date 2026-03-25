@@ -1,11 +1,11 @@
 experiment:
-  name: v1_seoul_temperature
+  name: real_q1_2025_multitarget
 training:
-  batch_size: 32
-  max_epochs: 5
-  early_stopping_patience: 2
-  num_workers: 0
-  device: gpu
+  batch_size: 64
+  max_epochs: 30
+  early_stopping_patience: 5
+  num_workers: 4
+  device: cuda
   # Optional warm-start checkpoint for continued training.
   # resume_from: data/artifacts/experiments/best/model.pt
 artifacts:

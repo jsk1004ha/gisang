@@ -33,7 +33,6 @@ class ServiceSpec:
 SERVICE_SPECS = {
     "asos_hourly": ServiceSpec(url=ASOS_HOURLY_URL, datetime_format="%Y-%m-%dT%H:%M:%S%z", make_params=lambda s, e, station, cfg: {
         "ServiceKey": _require_kma_key(),
-        "pageNo": 1,
         "numOfRows": cfg.get("page_size", 999),
         "dataType": cfg.get("data_type", "JSON"),
         "dataCd": "ASOS",
@@ -46,7 +45,6 @@ SERVICE_SPECS = {
     }),
     "aws_minutely": ServiceSpec(url=AWS_MINUTELY_URL, datetime_format="%Y-%m-%dT%H:%M:%S%z", make_params=lambda s, e, station, cfg: {
         "ServiceKey": _require_kma_key(),
-        "pageNo": 1,
         "numOfRows": cfg.get("page_size", 999),
         "dataType": cfg.get("data_type", "JSON"),
         "awsDt": s.strftime("%Y%m%d%H%M"),
@@ -73,13 +71,14 @@ def download_kma_observations(config: dict[str, Any]) -> pd.DataFrame:
         if service_name == "aws_minutely":
             cursor = start
             while cursor <= end:
-                frame = _request_json(spec.url, spec.make_params(cursor, end, station, config))
+                next_day = min(cursor + timedelta(days=1) - timedelta(minutes=1), end)
+                frame = _request_paginated_json(spec.url, spec.make_params(cursor, next_day, station, config), page_size=int(config.get("page_size", 999)))
                 if not frame.empty:
                     frame["station_id"] = station
                     frames.append(frame)
                 cursor += timedelta(days=1)
         else:
-            frame = _request_json(spec.url, spec.make_params(start, end, station, config))
+            frame = _request_paginated_json(spec.url, spec.make_params(start, end, station, config), page_size=int(config.get("page_size", 999)))
             if not frame.empty:
                 frame["station_id"] = station
                 frames.append(frame)
@@ -95,15 +94,36 @@ def download_kma_observations(config: dict[str, Any]) -> pd.DataFrame:
     return result
 
 
-def _request_json(url: str, params: dict[str, Any]) -> pd.DataFrame:
+def _request_paginated_json(url: str, params: dict[str, Any], page_size: int) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    page = 1
+    while True:
+        paged_params = dict(params)
+        paged_params["pageNo"] = page
+        paged_params["numOfRows"] = page_size
+        frame, total_count = _request_json(url, paged_params)
+        if frame.empty:
+            break
+        frames.append(frame)
+        if total_count is None or page * page_size >= total_count:
+            break
+        page += 1
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def _request_json(url: str, params: dict[str, Any]) -> tuple[pd.DataFrame, int | None]:
     response = requests.get(url, params=params, timeout=60)
     response.raise_for_status()
     payload = response.json()
     body = payload.get("response", {}).get("body", {})
     items = body.get("items", {}).get("item", [])
+    total_count = body.get("totalCount")
     if isinstance(items, dict):
         items = [items]
-    return pd.DataFrame(items)
+    parsed_total_count = int(total_count) if total_count is not None else None
+    return pd.DataFrame(items), parsed_total_count
 
 
 def _normalize_kma_frame(df: pd.DataFrame, service_name: str) -> pd.DataFrame:

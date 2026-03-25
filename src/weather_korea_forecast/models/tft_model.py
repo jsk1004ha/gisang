@@ -276,13 +276,13 @@ def _fit_with_lightning(
     return TrainResult(history=[], best_val_loss=best_val_loss)
 
 
-def _predict_with_lightning(model: Any, loader: Any, bundle: Any) -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
+def _predict_with_lightning(model: Any, loader: Any, bundle: Any, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
     prediction = model.predict(
         loader,
         return_index=True,
         return_y=True,
         trainer_kwargs={
-            "accelerator": "cpu",
+            "accelerator": "cpu" if device == "cpu" else "auto",
             "devices": 1,
             "logger": False,
             "enable_checkpointing": False,

@@ -30,6 +30,9 @@ def build_training_table(config: dict) -> pd.DataFrame:
         station_df=station_metadata,
         mode=config.get("era5", {}).get("extraction_mode", "nearest"),
     )
+    observations["station_id"] = observations["station_id"].astype(str)
+    era5_features["station_id"] = era5_features["station_id"].astype(str)
+    station_metadata["station_id"] = station_metadata["station_id"].astype(str)
 
     merged = observations.merge(era5_features, on=["station_id", "datetime"], how="left")
     merged = merged.merge(station_metadata, on="station_id", how="left")

@@ -18,6 +18,7 @@ def extract_era5_at_stations(
 ) -> pd.DataFrame:
     if {"station_id", "datetime"}.issubset(era5_df.columns):
         aligned = align_dataframe_timezone(era5_df, source_tz="UTC")
+        aligned["station_id"] = aligned["station_id"].astype(str)
         return aligned.sort_values(["station_id", "datetime"]).reset_index(drop=True)
 
     required = {"datetime", "lat", "lon"}
@@ -40,6 +41,7 @@ def extract_era5_at_stations(
             outputs.append(row)
 
     result = pd.DataFrame(outputs)
+    result["station_id"] = result["station_id"].astype(str)
     return result.sort_values(["station_id", "datetime"]).reset_index(drop=True)
 
 

@@ -25,7 +25,8 @@ def generate_forecast(
     experiment_path = resolve_path(experiment_dir)
     data_config = load_yaml(experiment_path / "data_config.yaml")
     model_config = resolve_model_config(load_yaml(experiment_path / "model_config.yaml"))
-    _ = load_yaml(experiment_path / "train_config.yaml")
+    train_config = load_yaml(experiment_path / "train_config.yaml")
+    inference_device = train_config.get("training", {}).get("device", "cpu")
 
     training_table = _load_or_build_training_table(data_config)
     training_table = training_table.copy()
@@ -87,10 +88,11 @@ def generate_forecast(
             decoder_frame=decoder_frame,
             future_timestamps=future_timestamps,
             station_id=normalized_station_id,
+            device=inference_device,
         )
     else:
         wrapper = TFTModelWrapper.load(experiment_path / "model.pt", bundle)
-        prediction, _, _ = wrapper.predict_loader([batch])
+        prediction, _, _ = wrapper.predict_loader([batch], device=inference_device)
 
     points: list[ForecastPoint] = []
     for horizon_index in range(prediction.shape[1]):
@@ -124,6 +126,7 @@ def _predict_with_tft_bundle(
     decoder_frame: pd.DataFrame,
     future_timestamps: pd.DatetimeIndex,
     station_id: str,
+    device: str = "cpu",
 ) -> torch.Tensor:
     from pytorch_forecasting import TimeSeriesDataSet
 
@@ -165,7 +168,7 @@ def _predict_with_tft_bundle(
         prediction_result = model.predict(
             prediction_loader,
             trainer_kwargs={
-                "accelerator": "cpu",
+                "accelerator": "cpu" if device == "cpu" else "auto",
                 "devices": 1,
                 "logger": False,
                 "enable_checkpointing": False,
