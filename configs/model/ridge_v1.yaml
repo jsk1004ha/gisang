@@ -1,0 +1,7 @@
+model:
+  name: ridge_v1
+  type: ridge
+  alpha: 1.0
+  target_columns:
+    - target_temp
+    - target_humidity

@@ -102,6 +102,40 @@ def synthetic_project(tmp_path: Path) -> dict:
         },
         "scaling": {"mode": "global", "columns": ["obs_temp", "era5_t2m", "era5_sp", "era5_u10", "era5_v10", "era5_tp", "target_temp"]},
     }
+    multi_target_data_config = {
+        **data_config,
+        "targets": ["temp", "humidity"],
+        "features": {
+            **data_config["features"],
+            "encoder_continuous": [
+                "obs_temp",
+                "obs_humidity",
+                "era5_t2m",
+                "era5_sp",
+                "era5_u10",
+                "era5_v10",
+                "era5_tp",
+                "hour_sin",
+                "hour_cos",
+                "doy_sin",
+                "doy_cos",
+            ],
+        },
+        "scaling": {
+            "mode": "global",
+            "columns": [
+                "obs_temp",
+                "obs_humidity",
+                "era5_t2m",
+                "era5_sp",
+                "era5_u10",
+                "era5_v10",
+                "era5_tp",
+                "target_temp",
+                "target_humidity",
+            ],
+        },
+    }
 
     model_config = {
         "model": {
@@ -114,12 +148,37 @@ def synthetic_project(tmp_path: Path) -> dict:
             "learning_rate": 1e-2,
         }
     }
+    auto_tft_config = {
+        "model": {
+            **model_config["model"],
+            "name": "tft_auto_test",
+            "backend": "auto",
+            "allow_fallback_backend": True,
+            "target_columns": ["target_temp", "target_humidity"],
+        }
+    }
     baseline_config = {
         "model": {
             "name": "persistence_test",
             "type": "persistence",
             "seasonal_period": None,
             "target_columns": ["target_temp"],
+        }
+    }
+    ridge_config = {
+        "model": {
+            "name": "ridge_test",
+            "type": "ridge",
+            "alpha": 1.0,
+            "target_columns": ["target_temp", "target_humidity"],
+        }
+    }
+    seasonal_baseline_config = {
+        "model": {
+            "name": "seasonal_persistence_test",
+            "type": "seasonal_persistence",
+            "seasonal_period": 24,
+            "target_columns": ["target_temp", "target_humidity"],
         }
     }
     train_config = {
@@ -132,7 +191,11 @@ def synthetic_project(tmp_path: Path) -> dict:
     return {
         "root": tmp_path,
         "data_config": data_config,
+        "multi_target_data_config": multi_target_data_config,
         "model_config": model_config,
+        "auto_tft_config": auto_tft_config,
         "baseline_config": baseline_config,
+        "ridge_config": ridge_config,
+        "seasonal_baseline_config": seasonal_baseline_config,
         "train_config": train_config,
     }

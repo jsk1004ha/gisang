@@ -87,6 +87,21 @@ class TFTModelWrapper:
         early_stopping_patience: int = 3,
     ) -> TrainResult:
         if self.backend == "pytorch_forecasting":
+            if isinstance(self.model, dict):
+                history: list[dict[str, float | str]] = []
+                val_losses: list[float] = []
+                for target_column, target_model in self.model.items():
+                    result = _fit_with_lightning(
+                        target_model,
+                        train_loader[target_column],
+                        val_loader[target_column],
+                        max_epochs=max_epochs,
+                        device=device,
+                        early_stopping_patience=early_stopping_patience,
+                    )
+                    history.append({"target_name": target_column.replace("target_", "", 1), "best_val_loss": result.best_val_loss})
+                    val_losses.append(result.best_val_loss)
+                return TrainResult(history=history, best_val_loss=sum(val_losses) / len(val_losses))
             return _fit_with_lightning(
                 self.model,
                 train_loader,
@@ -123,6 +138,17 @@ class TFTModelWrapper:
 
     def predict_loader(self, loader: Any, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
         if self.backend == "pytorch_forecasting":
+            if isinstance(self.model, dict):
+                predictions: list[torch.Tensor] = []
+                targets: list[torch.Tensor] = []
+                metadata: dict[str, list[Any]] | None = None
+                for target_column in self.bundle.target_columns:
+                    target_prediction, target_target, target_metadata = _predict_with_lightning(self.model[target_column], loader[target_column], self.bundle)
+                    predictions.append(target_prediction)
+                    targets.append(target_target)
+                    if metadata is None:
+                        metadata = target_metadata
+                return torch.cat(predictions, dim=-1), torch.cat(targets, dim=-1), metadata or {"station_id": [], "prediction_start": []}
             return _predict_with_lightning(self.model, loader, self.bundle)
 
         self.model.to(device)
@@ -148,7 +174,7 @@ class TFTModelWrapper:
         payload = {
             "backend": self.backend,
             "config": self.config,
-            "state_dict": self.model.state_dict(),
+            "state_dict": _serialize_state_dict(self.model),
             "extra_state": extra_state or {},
         }
         torch.save(payload, path)
@@ -156,9 +182,16 @@ class TFTModelWrapper:
 
     @classmethod
     def load(cls, path: str | Path, bundle: Any) -> "TFTModelWrapper":
-        checkpoint = torch.load(path, map_location="cpu")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         wrapper = cls.from_dataset_bundle(bundle, checkpoint["config"])
-        wrapper.model.load_state_dict(checkpoint["state_dict"])
+        _load_serialized_state_dict(wrapper.model, checkpoint["state_dict"])
+        return wrapper
+
+    @classmethod
+    def load_for_resume(cls, path: str | Path, bundle: Any, model_config: dict[str, Any] | None = None) -> "TFTModelWrapper":
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        wrapper = cls.from_dataset_bundle(bundle, model_config or checkpoint["config"])
+        _load_serialized_state_dict(wrapper.model, checkpoint["state_dict"])
         return wrapper
 
 
@@ -196,14 +229,21 @@ def _build_pytorch_forecasting_model(bundle: Any, model_config: dict[str, Any]) 
     except ImportError as exc:
         raise RuntimeError("pytorch_forecasting is not installed.") from exc
 
-    return TemporalFusionTransformer.from_dataset(
-        bundle.train_dataset,
-        learning_rate=float(model_config["model"].get("learning_rate", 1e-3)),
-        hidden_size=int(model_config["model"].get("hidden_size", 32)),
-        attention_head_size=int(model_config["model"].get("attention_head_size", 4)),
-        dropout=float(model_config["model"].get("dropout", 0.1)),
-        hidden_continuous_size=int(model_config["model"].get("hidden_continuous_size", 16)),
-    )
+    datasets_by_target = bundle.metadata.get("pf_datasets", {})
+    models: dict[str, Any] = {}
+    for target_column in bundle.target_columns:
+        train_dataset = datasets_by_target.get(target_column, {}).get("train", bundle.train_dataset)
+        models[target_column] = TemporalFusionTransformer.from_dataset(
+            train_dataset,
+            learning_rate=float(model_config["model"].get("learning_rate", 1e-3)),
+            hidden_size=int(model_config["model"].get("hidden_size", 32)),
+            attention_head_size=int(model_config["model"].get("attention_head_size", 4)),
+            dropout=float(model_config["model"].get("dropout", 0.1)),
+            hidden_continuous_size=int(model_config["model"].get("hidden_continuous_size", 16)),
+        )
+    if len(models) == 1:
+        return models[bundle.target_columns[0]]
+    return models
 
 
 def _fit_with_lightning(
@@ -274,3 +314,26 @@ def _predict_with_lightning(model: Any, loader: Any, bundle: Any) -> tuple[torch
         "prediction_start": index_frame["prediction_start"].astype(str).tolist(),
     }
     return output.cpu(), target.cpu(), metadata
+
+
+def can_use_pytorch_forecasting() -> bool:
+    try:
+        import lightning  # noqa: F401
+        import pytorch_forecasting  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _serialize_state_dict(model: Any) -> Any:
+    if isinstance(model, dict):
+        return {name: component.state_dict() for name, component in model.items()}
+    return model.state_dict()
+
+
+def _load_serialized_state_dict(model: Any, state_dict: Any) -> None:
+    if isinstance(model, dict):
+        for name, component in model.items():
+            component.load_state_dict(state_dict[name])
+        return
+    model.load_state_dict(state_dict)

@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 class ForecastPoint:
     station_id: str
     timestamp: str
+    target_name: str
     prediction: float
 
     def to_dict(self) -> dict[str, object]:

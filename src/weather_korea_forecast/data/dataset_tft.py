@@ -32,6 +32,14 @@ class PreparedDatasetBundle:
     def make_dataloader(self, split: str, batch_size: int, num_workers: int = 0, shuffle: bool = False) -> DataLoader:
         dataset = {"train": self.train_dataset, "val": self.val_dataset, "test": self.test_dataset}[split]
         if self.backend == "pytorch_forecasting":
+            pf_datasets = self.metadata.get("pf_datasets")
+            if pf_datasets:
+                if len(self.target_columns) == 1:
+                    return pf_datasets[self.target_columns[0]][split].to_dataloader(train=shuffle, batch_size=batch_size, num_workers=num_workers)
+                return {
+                    target_column: target_sets[split].to_dataloader(train=shuffle, batch_size=batch_size, num_workers=num_workers)
+                    for target_column, target_sets in pf_datasets.items()
+                }
             return dataset.to_dataloader(train=shuffle, batch_size=batch_size, num_workers=num_workers)
         return DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle)
 
@@ -124,6 +132,7 @@ def build_dataset_bundle(
             encoder_length=encoder_length,
             prediction_length=prediction_length,
             scaler=scaler,
+            scaling_columns=scaling_columns,
         )
         return bundle
 
@@ -166,6 +175,7 @@ def _build_pytorch_forecasting_bundle(
     encoder_length: int,
     prediction_length: int,
     scaler: ColumnScaler,
+    scaling_columns: list[str],
 ) -> PreparedDatasetBundle:
     try:
         from pytorch_forecasting import TimeSeriesDataSet  # type: ignore
@@ -176,10 +186,8 @@ def _build_pytorch_forecasting_bundle(
     val_frame = split_frames["val"].copy()
     test_frame = split_frames["test"].copy()
 
-    target_column = target_columns[0]
     common_kwargs = dict(
         time_idx="time_idx",
-        target=target_column,
         group_ids=["station_id"],
         max_encoder_length=encoder_length,
         max_prediction_length=prediction_length,
@@ -188,13 +196,19 @@ def _build_pytorch_forecasting_bundle(
         time_varying_unknown_reals=unknown_columns,
         allow_missing_timesteps=False,
     )
-    train_dataset = TimeSeriesDataSet(train_frame, **common_kwargs)
-    val_dataset = TimeSeriesDataSet.from_dataset(train_dataset, val_frame, predict=False, stop_randomization=True)
-    test_dataset = TimeSeriesDataSet.from_dataset(train_dataset, test_frame, predict=False, stop_randomization=True)
+    datasets_by_target: dict[str, dict[str, Any]] = {}
+    for target_column in target_columns:
+        train_dataset = TimeSeriesDataSet(train_frame, target=target_column, **common_kwargs)
+        val_dataset = TimeSeriesDataSet.from_dataset(train_dataset, val_frame, predict=False, stop_randomization=True)
+        test_dataset = TimeSeriesDataSet.from_dataset(train_dataset, test_frame, predict=False, stop_randomization=True)
+        datasets_by_target[target_column] = {"train": train_dataset, "val": val_dataset, "test": test_dataset}
+
+    primary_target = target_columns[0]
+    primary_datasets = datasets_by_target[primary_target]
     return PreparedDatasetBundle(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        test_dataset=test_dataset,
+        train_dataset=primary_datasets["train"],
+        val_dataset=primary_datasets["val"],
+        test_dataset=primary_datasets["test"],
         train_frame=train_frame,
         val_frame=val_frame,
         test_frame=test_frame,
@@ -207,5 +221,5 @@ def _build_pytorch_forecasting_bundle(
         encoder_length=encoder_length,
         prediction_length=prediction_length,
         backend="pytorch_forecasting",
-        metadata={},
+        metadata={"pf_datasets": datasets_by_target, "scaling_columns": scaling_columns},
     )

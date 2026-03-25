@@ -8,5 +8,5 @@ def to_weatherbenchx_sparse_frame(predictions: pd.DataFrame) -> pd.DataFrame:
     frame["init_time"] = pd.to_datetime(frame["prediction_start"], utc=True)
     frame["valid_time"] = pd.to_datetime(frame["valid_time"], utc=True)
     columns = ["station_id", "init_time", "valid_time", "prediction", "actual"]
-    optional = [column for column in ("region", "season", "horizon_step") if column in frame.columns]
+    optional = [column for column in ("target_name", "target_column", "region", "season", "horizon_step") if column in frame.columns]
     return frame[columns + optional]

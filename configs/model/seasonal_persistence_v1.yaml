@@ -1,0 +1,7 @@
+model:
+  name: seasonal_persistence_v1
+  type: seasonal_persistence
+  seasonal_period: 24
+  target_columns:
+    - target_temp
+    - target_humidity

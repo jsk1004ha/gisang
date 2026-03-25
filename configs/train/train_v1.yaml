@@ -6,5 +6,7 @@ training:
   early_stopping_patience: 2
   num_workers: 0
   device: cpu
+  # Optional warm-start checkpoint for continued training.
+  # resume_from: data/artifacts/experiments/best/model.pt
 artifacts:
   root_dir: data/artifacts/experiments

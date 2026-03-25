@@ -8,7 +8,7 @@ import pandas as pd
 from weather_korea_forecast.evaluation.plots import plot_forecast_vs_actual
 from weather_korea_forecast.evaluation.regional_report import build_breakdown_reports
 from weather_korea_forecast.evaluation.weatherbenchx_adapter import to_weatherbenchx_sparse_frame
-from weather_korea_forecast.training.metrics import compute_point_metrics
+from weather_korea_forecast.training.metrics import compute_prediction_metrics
 from weather_korea_forecast.utils.io import read_table, write_json, write_table
 from weather_korea_forecast.utils.paths import resolve_path
 
@@ -16,7 +16,7 @@ from weather_korea_forecast.utils.paths import resolve_path
 def evaluate_experiment(experiment_dir: str | Path) -> dict[str, object]:
     experiment_path = resolve_path(experiment_dir)
     predictions = read_table(experiment_path / "predictions_test.csv")
-    overall_metrics = compute_point_metrics(predictions["actual"].to_numpy(), predictions["prediction"].to_numpy())
+    overall_metrics = compute_prediction_metrics(predictions)
     breakdowns = build_breakdown_reports(predictions)
     metrics_path = write_json(overall_metrics, experiment_path / "metrics_summary.json")
     for name, report in breakdowns.items():

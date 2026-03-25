@@ -1,7 +1,8 @@
 model:
   name: tft_v1
   type: tft
-  backend: pytorch_forecasting
+  backend: auto
+  allow_fallback_backend: true
   target_columns:
     - target_temp
   hidden_size: 32

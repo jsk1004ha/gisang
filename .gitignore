@@ -37,6 +37,7 @@ dist/
 *.log
 tmp/
 temp/
+tmp_smoke*/
 
 # Model and experiment artifacts
 *.ckpt

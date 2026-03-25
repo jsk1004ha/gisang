@@ -13,3 +13,12 @@ def test_build_dataset_bundle_creates_windows(synthetic_project: dict) -> None:
     assert sample["encoder_cont"].shape == (6, 10)
     assert sample["decoder_known"].shape == (3, 4)
     assert sample["target"].shape == (3, 1)
+
+
+def test_build_dataset_bundle_creates_multi_target_windows(synthetic_project: dict) -> None:
+    training_table = build_training_table(synthetic_project["multi_target_data_config"])
+    bundle = build_dataset_bundle(training_table, synthetic_project["multi_target_data_config"], backend="fallback_torch")
+
+    sample = bundle.train_dataset[0]
+    assert sample["encoder_cont"].shape == (6, 11)
+    assert sample["target"].shape == (3, 2)
