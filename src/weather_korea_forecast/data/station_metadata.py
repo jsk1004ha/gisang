@@ -14,4 +14,7 @@ def load_station_metadata(path: str | Path) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Missing required station metadata columns: {sorted(missing)}")
     metadata["station_id"] = metadata["station_id"].astype(str)
-    return enrich_station_metadata(metadata)
+    enriched = enrich_station_metadata(metadata)
+    if "region_class" not in enriched.columns:
+        enriched["region_class"] = enriched.get("region", "unknown")
+    return enriched

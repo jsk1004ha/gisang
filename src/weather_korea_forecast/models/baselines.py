@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import torch
 
 
@@ -37,6 +38,33 @@ class PersistenceBaseline:
             target_values.append(base)
         prediction = torch.cat(target_values, dim=-1)
         return prediction.unsqueeze(1).repeat(1, horizon, 1)
+
+    def save(self, path: str | Path, extra_state: dict[str, Any] | None = None) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "seasonal_period": self.seasonal_period,
+            "encoder_feature_names": self.encoder_feature_names,
+            "target_columns": self.target_columns,
+            "target_source_features": self.target_source_features,
+            "extra_state": extra_state or {},
+        }
+        torch.save(payload, path)
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path, bundle, model_config: dict | None = None) -> "PersistenceBaseline":
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        return cls(
+            encoder_feature_names=bundle.encoder_columns,
+            target_columns=bundle.target_columns,
+            seasonal_period=checkpoint.get("seasonal_period"),
+            target_source_features=checkpoint.get("target_source_features"),
+        )
+
+    @classmethod
+    def load_for_resume(cls, path: str | Path, bundle, model_config: dict | None = None) -> "PersistenceBaseline":
+        return cls.load(path, bundle, model_config)
 
 
 class RidgeRegressionBaseline:
@@ -127,6 +155,137 @@ class RidgeRegressionBaseline:
         outputs = features @ self.weights + self.bias
         return outputs.reshape(features.shape[0], self.prediction_length, len(self.target_columns))
 
+    def feature_importance_frame(self, feature_names: list[str]) -> pd.DataFrame | None:
+        if self.weights is None:
+            return None
+        weights = self.weights.detach().cpu().numpy()
+        rows: list[dict[str, float | str | int]] = []
+        output_index = 0
+        for horizon_step in range(1, self.prediction_length + 1):
+            for target_name in self.target_columns:
+                for feature_index, feature_name in enumerate(feature_names):
+                    rows.append(
+                        {
+                            "target_column": target_name,
+                            "horizon_step": horizon_step,
+                            "feature_name": feature_name,
+                            "coefficient": float(weights[feature_index, output_index]),
+                            "abs_coefficient": abs(float(weights[feature_index, output_index])),
+                        }
+                    )
+                output_index += 1
+        return pd.DataFrame(rows).sort_values(["target_column", "horizon_step", "abs_coefficient"], ascending=[True, True, False])
+
+
+class LightGBMBaseline:
+    def __init__(
+        self,
+        encoder_feature_names: list[str],
+        target_columns: list[str],
+        prediction_length: int,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        self.encoder_feature_names = encoder_feature_names
+        self.target_columns = target_columns
+        self.prediction_length = prediction_length
+        self.params = params or {}
+        self.model = None
+
+    def fit(
+        self,
+        train_loader,
+        val_loader,
+        max_epochs: int,
+        learning_rate: float,
+        device: str = "cpu",
+        early_stopping_patience: int = 3,
+    ) -> BaselineTrainResult:
+        train_features, train_targets = _collect_regression_tensors(train_loader)
+        val_features, val_targets = _collect_regression_tensors(val_loader)
+        self.model = _build_lightgbm_regressor(self.params)
+        self.model.fit(train_features.numpy(), train_targets.numpy())
+        train_prediction = torch.tensor(self.model.predict(train_features.numpy()), dtype=torch.float32)
+        val_prediction = torch.tensor(self.model.predict(val_features.numpy()), dtype=torch.float32)
+        train_loss = _mse_loss(train_prediction, train_targets)
+        val_loss = _mse_loss(val_prediction, val_targets)
+        return BaselineTrainResult(
+            history=[{"epoch": "lightgbm_fit", "train_loss": train_loss, "val_loss": val_loss}],
+            best_val_loss=val_loss,
+        )
+
+    def predict_batch(self, batch: dict) -> torch.Tensor:
+        if self.model is None:
+            raise RuntimeError("LightGBMBaseline must be fit before prediction.")
+        features = _flatten_batch_features(batch)
+        prediction = self.model.predict(features.numpy())
+        tensor = torch.tensor(prediction, dtype=torch.float32)
+        return tensor.reshape(features.shape[0], self.prediction_length, len(self.target_columns))
+
+    def predict_loader(self, loader, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
+        predictions: list[torch.Tensor] = []
+        targets: list[torch.Tensor] = []
+        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": []}
+        for batch in loader:
+            predictions.append(self.predict_batch(batch))
+            targets.append(batch["target"].cpu())
+            metadata["station_id"].extend(batch["station_id"])
+            metadata["prediction_start"].extend(batch["prediction_start"])
+        return torch.cat(predictions), torch.cat(targets), metadata
+
+    def save(self, path: str | Path, extra_state: dict[str, Any] | None = None) -> Path:
+        if self.model is None:
+            raise RuntimeError("LightGBMBaseline must be fit before saving.")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "model": self.model,
+            "params": self.params,
+            "extra_state": extra_state or {},
+        }
+        torch.save(payload, path)
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path, bundle, model_config: dict | None = None) -> "LightGBMBaseline":
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        params = dict((model_config or {}).get("model", {}).get("params", checkpoint.get("params", {})))
+        model = cls(
+            encoder_feature_names=bundle.encoder_columns,
+            target_columns=bundle.target_columns,
+            prediction_length=bundle.prediction_length,
+            params=params,
+        )
+        model.model = checkpoint["model"]
+        return model
+
+    @classmethod
+    def load_for_resume(cls, path: str | Path, bundle, model_config: dict | None = None) -> "LightGBMBaseline":
+        return cls.load(path, bundle, model_config)
+
+    def feature_importance_frame(self, feature_names: list[str]) -> pd.DataFrame | None:
+        if self.model is None or not hasattr(self.model, "estimators_"):
+            return None
+        rows: list[dict[str, float | str | int]] = []
+        output_index = 0
+        for horizon_step in range(1, self.prediction_length + 1):
+            for target_name in self.target_columns:
+                estimator = self.model.estimators_[output_index]
+                if hasattr(estimator, "feature_importances_"):
+                    importances = estimator.feature_importances_
+                else:
+                    continue
+                for feature_name, importance in zip(feature_names, importances):
+                    rows.append(
+                        {
+                            "target_column": target_name,
+                            "horizon_step": horizon_step,
+                            "feature_name": feature_name,
+                            "importance": float(importance),
+                        }
+                    )
+                output_index += 1
+        return pd.DataFrame(rows).sort_values(["target_column", "horizon_step", "importance"], ascending=[True, True, False])
+
 
 def _default_target_source_features(target_columns: list[str], encoder_feature_names: list[str]) -> list[str]:
     source_features: list[str] = []
@@ -175,3 +334,24 @@ def _solve_ridge_regression(features: torch.Tensor, targets: torch.Tensor, alpha
 
 def _mse_loss(prediction: torch.Tensor, target: torch.Tensor) -> float:
     return float(torch.mean(torch.square(prediction.reshape(target.shape) - target)).item())
+
+
+def _build_lightgbm_regressor(params: dict[str, Any]):
+    try:
+        from lightgbm import LGBMRegressor  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("lightgbm is not installed. Install it to use the lightgbm baseline.") from exc
+    from sklearn.multioutput import MultiOutputRegressor
+
+    default_params = {
+        "n_estimators": 200,
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "n_jobs": 1,
+        "random_state": 42,
+        "verbosity": -1,
+    }
+    default_params.update(params)
+    return MultiOutputRegressor(LGBMRegressor(**default_params))

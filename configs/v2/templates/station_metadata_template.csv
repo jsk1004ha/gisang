@@ -1,0 +1,5 @@
+station_id,lat,lon,elevation,region_class,coastal_distance_km
+108,37.57142,126.9658,85.67,capital,35.0
+159,35.10468,129.03203,69.56,coastal,2.0
+143,35.15953,126.85260,74.52,inland,47.0
+184,33.51411,126.52969,20.79,island,0.5

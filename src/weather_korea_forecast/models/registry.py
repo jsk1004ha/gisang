@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from weather_korea_forecast.models.baselines import PersistenceBaseline, RidgeRegressionBaseline
+from weather_korea_forecast.models.baselines import LightGBMBaseline, PersistenceBaseline, RidgeRegressionBaseline
 from weather_korea_forecast.models.tft_model import TFTModelWrapper, can_use_pytorch_forecasting
 
 
@@ -25,6 +25,13 @@ def build_model(model_config: dict, bundle):
             target_columns=bundle.target_columns,
             prediction_length=bundle.prediction_length,
             alpha=float(resolved_config["model"].get("alpha", 1.0)),
+        )
+    if model_type == "lightgbm":
+        return LightGBMBaseline(
+            encoder_feature_names=bundle.encoder_columns,
+            target_columns=bundle.target_columns,
+            prediction_length=bundle.prediction_length,
+            params=dict(resolved_config["model"].get("params", {})),
         )
     if model_type == "tft":
         return TFTModelWrapper.from_dataset_bundle(bundle, resolved_config)

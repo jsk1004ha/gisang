@@ -7,6 +7,8 @@ def enrich_station_metadata(df: pd.DataFrame) -> pd.DataFrame:
     frame = df.copy()
     if "region" not in frame.columns:
         frame["region"] = "unknown"
+    if "region_class" not in frame.columns:
+        frame["region_class"] = frame["region"]
     if "coastal_distance_km" not in frame.columns:
         frame["coastal_distance_km"] = float("nan")
     if "terrain_class" not in frame.columns:

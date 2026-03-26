@@ -1,0 +1,149 @@
+experiment:
+  name: v2_temp_ridge
+  version: v2
+  notes: "Single-target direct 24h ridge baseline for temperature."
+paths:
+  observation_csv: data/raw/asos/asos_multistation_v2.csv
+  era5_csv: data/raw/era5/asos_multistation_v2_station.csv
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+  output_training_table: data/processed/v2_temp_direct24/training_table.csv
+  output_data_quality: data/processed/v2_temp_direct24/data_quality.json
+data:
+  target_name: temp
+  timezone:
+    source: Asia/Seoul
+  observation_columns:
+    station_id: station_id
+    datetime: datetime
+    temp: temp
+    humidity: humidity
+    pressure: pressure
+    wind_speed: wind_speed
+    precipitation: precipitation
+    quality_flag: quality_flag
+  era5:
+    extraction_mode: bilinear
+  cleaning:
+    interpolate_limit_hours: 12
+  features:
+    encoder_continuous:
+      - target_value
+      - target_value_lag_1
+      - target_value_lag_3
+      - target_value_lag_6
+      - target_value_lag_12
+      - target_value_lag_24
+      - target_value_lag_48
+      - target_value_lag_72
+      - target_value_same_hour_prev_day
+      - target_value_roll_mean_3
+      - target_value_roll_std_3
+      - target_value_roll_mean_6
+      - target_value_roll_std_6
+      - target_value_roll_mean_12
+      - target_value_roll_std_12
+      - target_value_roll_mean_24
+      - target_value_roll_std_24
+      - target_value_delta_1
+      - target_value_delta_6
+      - target_value_delta_24
+      - obs_pressure
+      - obs_wind_speed
+      - obs_precipitation
+      - era5_t2m
+      - era5_sp
+      - era5_u10
+      - era5_v10
+      - era5_tp
+      - hour_sin
+      - hour_cos
+      - doy_sin
+      - doy_cos
+    decoder_known:
+      - hour_sin
+      - hour_cos
+      - doy_sin
+      - doy_cos
+    static_real:
+      - lat
+      - lon
+      - elevation
+      - coastal_distance_km
+    static_categoricals:
+      - station_id
+      - region_class
+  feature_engineering:
+    lag_features:
+      target_value: [1, 3, 6, 12, 24, 48, 72, 168]
+      obs_pressure: [1, 6, 24]
+      obs_wind_speed: [1, 6, 24]
+      era5_t2m: [1, 3, 6, 12, 24]
+      era5_sp: [1, 6, 24]
+    rolling_features:
+      target_value: [3, 6, 12, 24]
+    delta_features:
+      target_value: [1, 6, 24]
+  window:
+    encoder_length: 72
+    prediction_length: 24
+  split:
+    train_end: 2024-12-31T23:00:00Z
+    val_end: 2025-01-31T23:00:00Z
+    test_end: 2025-02-28T23:00:00Z
+  scaling:
+    mode: global
+    group_column: station_id
+    columns:
+      - target_value
+      - target_value_lag_1
+      - target_value_lag_3
+      - target_value_lag_6
+      - target_value_lag_12
+      - target_value_lag_24
+      - target_value_lag_48
+      - target_value_lag_72
+      - target_value_same_hour_prev_day
+      - target_value_roll_mean_3
+      - target_value_roll_std_3
+      - target_value_roll_mean_6
+      - target_value_roll_std_6
+      - target_value_roll_mean_12
+      - target_value_roll_std_12
+      - target_value_roll_mean_24
+      - target_value_roll_std_24
+      - target_value_delta_1
+      - target_value_delta_6
+      - target_value_delta_24
+      - obs_pressure
+      - obs_wind_speed
+      - obs_precipitation
+      - era5_t2m
+      - era5_sp
+      - era5_u10
+      - era5_v10
+      - era5_tp
+      - lat
+      - lon
+      - elevation
+      - coastal_distance_km
+  postprocess:
+    clip_prediction: null
+model:
+  name: v2_temp_ridge
+  type: ridge
+  alpha: 1.0
+training:
+  batch_size: 64
+  max_epochs: 1
+  early_stopping_patience: 1
+  num_workers: 0
+  device: cpu
+  gradient_clip_val: 0.0
+evaluation:
+  bias_correction:
+    enabled: true
+    mode: per_horizon
+artifacts:
+  root_dir: data/artifacts/v2_experiments
+  leaderboard_path: data/artifacts/v2_experiments/leaderboard.csv
+

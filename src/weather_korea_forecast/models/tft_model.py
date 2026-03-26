@@ -50,6 +50,7 @@ class FallbackSeqForecaster(nn.Module):
 class TrainResult:
     history: list[dict[str, float]]
     best_val_loss: float
+    best_epoch: int | None = None
 
 
 class TFTModelWrapper:
@@ -85,11 +86,13 @@ class TFTModelWrapper:
         learning_rate: float,
         device: str = "cpu",
         early_stopping_patience: int = 3,
+        gradient_clip_val: float = 0.0,
     ) -> TrainResult:
         if self.backend == "pytorch_forecasting":
             if isinstance(self.model, dict):
                 history: list[dict[str, float | str]] = []
                 val_losses: list[float] = []
+                best_epochs: list[int] = []
                 for target_column, target_model in self.model.items():
                     result = _fit_with_lightning(
                         target_model,
@@ -98,10 +101,14 @@ class TFTModelWrapper:
                         max_epochs=max_epochs,
                         device=device,
                         early_stopping_patience=early_stopping_patience,
+                        gradient_clip_val=gradient_clip_val,
                     )
                     history.append({"target_name": target_column.replace("target_", "", 1), "best_val_loss": result.best_val_loss})
                     val_losses.append(result.best_val_loss)
-                return TrainResult(history=history, best_val_loss=sum(val_losses) / len(val_losses))
+                    if result.best_epoch is not None:
+                        best_epochs.append(result.best_epoch)
+                aggregate_best_epoch = min(best_epochs) if best_epochs else None
+                return TrainResult(history=history, best_val_loss=sum(val_losses) / len(val_losses), best_epoch=aggregate_best_epoch)
             return _fit_with_lightning(
                 self.model,
                 train_loader,
@@ -109,6 +116,7 @@ class TFTModelWrapper:
                 max_epochs=max_epochs,
                 device=device,
                 early_stopping_patience=early_stopping_patience,
+                gradient_clip_val=gradient_clip_val,
             )
 
         self.model.to(device)
@@ -117,6 +125,7 @@ class TFTModelWrapper:
         history: list[dict[str, float]] = []
         best_state: dict[str, torch.Tensor] | None = None
         best_val_loss = float("inf")
+        best_epoch: int | None = None
         stale_epochs = 0
 
         for epoch in range(1, max_epochs + 1):
@@ -126,6 +135,7 @@ class TFTModelWrapper:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_state = {key: value.detach().cpu().clone() for key, value in self.model.state_dict().items()}
+                best_epoch = epoch
                 stale_epochs = 0
             else:
                 stale_epochs += 1
@@ -134,7 +144,7 @@ class TFTModelWrapper:
 
         if best_state is not None:
             self.model.load_state_dict(best_state)
-        return TrainResult(history=history, best_val_loss=best_val_loss)
+        return TrainResult(history=history, best_val_loss=best_val_loss, best_epoch=best_epoch)
 
     def predict_loader(self, loader: Any, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
         if self.backend == "pytorch_forecasting":
@@ -143,13 +153,18 @@ class TFTModelWrapper:
                 targets: list[torch.Tensor] = []
                 metadata: dict[str, list[Any]] | None = None
                 for target_column in self.bundle.target_columns:
-                    target_prediction, target_target, target_metadata = _predict_with_lightning(self.model[target_column], loader[target_column], self.bundle)
+                    target_prediction, target_target, target_metadata = _predict_with_lightning(
+                        self.model[target_column],
+                        loader[target_column],
+                        self.bundle,
+                        device=device,
+                    )
                     predictions.append(target_prediction)
                     targets.append(target_target)
                     if metadata is None:
                         metadata = target_metadata
                 return torch.cat(predictions, dim=-1), torch.cat(targets, dim=-1), metadata or {"station_id": [], "prediction_start": []}
-            return _predict_with_lightning(self.model, loader, self.bundle)
+            return _predict_with_lightning(self.model, loader, self.bundle, device=device)
 
         self.model.to(device)
         self.model.eval()
@@ -253,6 +268,7 @@ def _fit_with_lightning(
     max_epochs: int,
     device: str,
     early_stopping_patience: int,
+    gradient_clip_val: float = 0.0,
 ) -> TrainResult:
     try:
         import lightning as L  # type: ignore
@@ -260,10 +276,24 @@ def _fit_with_lightning(
     except ImportError as exc:
         raise RuntimeError("lightning is not installed.") from exc
 
+    history: list[dict[str, float]] = []
+
+    class HistoryCallback(L.Callback):
+        def on_validation_epoch_end(self, trainer, pl_module) -> None:
+            row: dict[str, float] = {"epoch": float(trainer.current_epoch + 1)}
+            for key in ("train_loss", "val_loss"):
+                value = trainer.callback_metrics.get(key)
+                if value is not None:
+                    row[key] = float(value.detach().cpu())
+            if len(row) > 1:
+                history.append(row)
+
     callbacks = [EarlyStopping(monitor="val_loss", patience=early_stopping_patience, mode="min")]
+    callbacks.append(HistoryCallback())
     trainer = L.Trainer(
         max_epochs=max_epochs,
         accelerator="cpu" if device == "cpu" else "auto",
+        gradient_clip_val=gradient_clip_val,
         enable_checkpointing=False,
         logger=False,
         enable_progress_bar=False,
@@ -273,7 +303,12 @@ def _fit_with_lightning(
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
     val_loss = trainer.callback_metrics.get("val_loss")
     best_val_loss = float(val_loss.detach().cpu()) if val_loss is not None else float("nan")
-    return TrainResult(history=[], best_val_loss=best_val_loss)
+    best_epoch = None
+    if history:
+        best_row = min((row for row in history if "val_loss" in row), key=lambda row: row["val_loss"], default=None)
+        if best_row is not None:
+            best_epoch = int(best_row["epoch"])
+    return TrainResult(history=history, best_val_loss=best_val_loss, best_epoch=best_epoch)
 
 
 def _predict_with_lightning(model: Any, loader: Any, bundle: Any, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:

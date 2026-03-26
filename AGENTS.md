@@ -11,23 +11,33 @@ The current implementation is a V1 pipeline with data preparation, training, eva
 - Prefer `python -m ...` entrypoints over ad hoc scripts.
 - If the package is not installed in the environment, use `PYTHONPATH=src`.
 - Keep changes config-driven. Prefer updating `configs/` and loader logic over hardcoding paths, stations, or feature lists in code.
+- V2 uses unified configs under `configs/v2/experiments/`. Keep V1 and V2 config flows separate.
 - Preserve both model backends:
   `fallback_torch` is the default lightweight path.
   `pytorch_forecasting` is the optional true-TFT path when extra dependencies are installed.
 - Do not describe the fallback model as a true TFT. It is a simpler substitute model.
+- V2 defaults to single-target experiments. Keep `temp` and `humidity` configs separate unless the task explicitly extends V2 multi-target support.
 
 ## Standard commands
 
 - Build training table:
   `python -m weather_korea_forecast.data.build_training_table --config configs/data/dataset_v1.yaml`
+- Prepare V2 training table:
+  `python -m weather_korea_forecast.v2.prepare_data --config configs/v2/experiments/v2_temp_ridge.yaml`
 - Train:
   `python -m weather_korea_forecast.training.train --data-config configs/data/dataset_v1.yaml --model-config configs/model/tft_v1.yaml --train-config configs/train/train_v1.yaml`
+- Train V2:
+  `python -m weather_korea_forecast.v2.train --config configs/v2/experiments/v2_temp_tft.yaml`
 - Resume training from the current best checkpoint:
   `python -m weather_korea_forecast.training.train --data-config configs/data/dataset_v1.yaml --model-config configs/model/tft_v1.yaml --train-config configs/train/train_v1.yaml --resume-from data/artifacts/experiments/best/model.pt`
 - Evaluate:
   `python -m weather_korea_forecast.evaluation.evaluate --experiment-dir data/artifacts/experiments/latest`
+- Evaluate V2:
+  `python -m weather_korea_forecast.v2.evaluate --experiment-dir data/artifacts/v2_experiments/latest`
 - Predict:
   `python -m weather_korea_forecast.inference.predict --experiment-dir data/artifacts/experiments/latest --station-id SEOUL --forecast-init-time 2025-01-03T00:00:00Z`
+- Predict V2:
+  `python -m weather_korea_forecast.v2.predict --experiment-dir data/artifacts/v2_experiments/latest --station-id 108 --forecast-init-time 2025-01-03T00:00:00Z`
 - Quick validation when dependencies are limited:
   `python -m compileall src`
 - Tests if `pytest` is installed:
@@ -49,12 +59,17 @@ The current implementation is a V1 pipeline with data preparation, training, eva
 - Multi-target support is not fully end-to-end yet. Do not assume `target_columns` works beyond the first target unless you have updated training, prediction, and evaluation paths together.
 - Baseline comparisons matter. If model behavior changes, consider whether baseline configs or reports also need updates.
 - Preserve the `latest/` alias behavior and the `best/` promotion behavior when touching experiment artifact management.
+- V2 also maintains `latest/` and `best/` aliases under its own artifact root. Do not mix V1 and V2 artifact directories.
 
 ## Files to update together
 
 - If you change config schema, update:
   `README.md`
   relevant files under `configs/`
+- If you change V2 experiment config schema, update:
+  `README.md`
+  `docs/V2_plan.md`
+  files under `configs/v2/`
 - If you change data loading or table-building behavior, update:
   `README.md`
   `tests/`

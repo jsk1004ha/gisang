@@ -23,6 +23,9 @@ tft = [
   "pytorch-forecasting>=1.0",
   "xarray>=2024.1.0",
 ]
+lgbm = [
+  "lightgbm>=4.5",
+]
 dev = [
   "pytest>=8.0",
 ]
