@@ -12,6 +12,7 @@ The current implementation is a V1 pipeline with data preparation, training, eva
 - If the package is not installed in the environment, use `PYTHONPATH=src`.
 - Keep changes config-driven. Prefer updating `configs/` and loader logic over hardcoding paths, stations, or feature lists in code.
 - V2 uses unified configs under `configs/v2/experiments/`. Keep V1 and V2 config flows separate.
+- If you add a repo-local real-data bootstrap config for V2, keep it under `configs/v2/experiments/real/` and document that it is a local example, not the canonical multi-station benchmark config.
 - Preserve both model backends:
   `fallback_torch` is the default lightweight path.
   `pytorch_forecasting` is the optional true-TFT path when extra dependencies are installed.
@@ -69,6 +70,7 @@ The current implementation is a V1 pipeline with data preparation, training, eva
 - If you change V2 experiment config schema, update:
   `README.md`
   `docs/V2_plan.md`
+  `CHANGELOG.md`
   files under `configs/v2/`
 - If you change data loading or table-building behavior, update:
   `README.md`

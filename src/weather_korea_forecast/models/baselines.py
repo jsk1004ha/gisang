@@ -190,6 +190,7 @@ class LightGBMBaseline:
         self.prediction_length = prediction_length
         self.params = params or {}
         self.model = None
+        self.feature_names: list[str] | None = None
 
     def fit(
         self,
@@ -202,10 +203,13 @@ class LightGBMBaseline:
     ) -> BaselineTrainResult:
         train_features, train_targets = _collect_regression_tensors(train_loader)
         val_features, val_targets = _collect_regression_tensors(val_loader)
+        self.feature_names = [f"feature_{index}" for index in range(train_features.shape[1])]
+        train_frame = pd.DataFrame(train_features.numpy(), columns=self.feature_names)
+        val_frame = pd.DataFrame(val_features.numpy(), columns=self.feature_names)
         self.model = _build_lightgbm_regressor(self.params)
-        self.model.fit(train_features.numpy(), train_targets.numpy())
-        train_prediction = torch.tensor(self.model.predict(train_features.numpy()), dtype=torch.float32)
-        val_prediction = torch.tensor(self.model.predict(val_features.numpy()), dtype=torch.float32)
+        self.model.fit(train_frame, train_targets.numpy())
+        train_prediction = torch.tensor(self.model.predict(train_frame), dtype=torch.float32)
+        val_prediction = torch.tensor(self.model.predict(val_frame), dtype=torch.float32)
         train_loss = _mse_loss(train_prediction, train_targets)
         val_loss = _mse_loss(val_prediction, val_targets)
         return BaselineTrainResult(
@@ -217,7 +221,7 @@ class LightGBMBaseline:
         if self.model is None:
             raise RuntimeError("LightGBMBaseline must be fit before prediction.")
         features = _flatten_batch_features(batch)
-        prediction = self.model.predict(features.numpy())
+        prediction = self.model.predict(_features_to_frame(features, self.feature_names))
         tensor = torch.tensor(prediction, dtype=torch.float32)
         return tensor.reshape(features.shape[0], self.prediction_length, len(self.target_columns))
 
@@ -240,6 +244,7 @@ class LightGBMBaseline:
         payload = {
             "model": self.model,
             "params": self.params,
+            "feature_names": self.feature_names,
             "extra_state": extra_state or {},
         }
         torch.save(payload, path)
@@ -256,6 +261,7 @@ class LightGBMBaseline:
             params=params,
         )
         model.model = checkpoint["model"]
+        model.feature_names = checkpoint.get("feature_names")
         return model
 
     @classmethod
@@ -355,3 +361,10 @@ def _build_lightgbm_regressor(params: dict[str, Any]):
     }
     default_params.update(params)
     return MultiOutputRegressor(LGBMRegressor(**default_params))
+
+
+def _features_to_frame(features: torch.Tensor, feature_names: list[str] | None) -> pd.DataFrame | Any:
+    feature_array = features.numpy()
+    if not feature_names:
+        return feature_array
+    return pd.DataFrame(feature_array, columns=feature_names)

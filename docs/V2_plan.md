@@ -92,19 +92,33 @@ observations
 - `training_history.json`
 - `predictions_test.csv`
 - `metrics_test.json`
+- `metrics_summary.json`
 - `metrics_target_name.csv`
 - `metrics_target_name_horizon_step.csv`
 - `metrics_target_name_station_id.csv`
 - `metrics_target_name_region.csv`
+- `metrics_target_name_season.csv`
+- `metrics_raw_target_name.csv`
+- `metrics_raw_target_name_horizon_step.csv`
+- `metrics_raw_target_name_station_id.csv`
+- `metrics_raw_target_name_region.csv`
+- `metrics_raw_target_name_season.csv`
 - `forecast_vs_actual.png`
+- `horizon_error.png`
+- `prediction_scatter.png`
+- `raw_vs_corrected.png`
 - `bias_correction.json`
+- `worst_case_samples.csv`
+- `feature_importance.csv` for supported baselines
+- `metrics_target_name_rolling_origin_fold.csv`
 - `experiment_summary.json`
 - `experiment_summary.md`
 - `leaderboard.csv`
+- `leaderboard_<target_name>.csv`
 
 ## Remaining Follow-ups
 
 - Residual forecasting is still a follow-up item.
-- Rolling-origin validation is not yet the default path.
-- LightGBM is implemented as an optional dependency and still requires installation.
-- Real multi-station production configs still need local ASOS/ERA5 data files to be populated.
+- Rolling-origin reporting exists, but true rolling-origin retraining is not yet the default path.
+- The canonical 12-20 station benchmark still depends on user-provided local ASOS/ERA5 data files.
+- Local real-data bootstrap configs currently cover Seoul smoke runs, not the full multi-station benchmark.

@@ -274,3 +274,27 @@ def test_v2_tft_roundtrip_for_humidity_with_clipping(synthetic_v2_project: dict[
     assert predictions["target_name"].eq("humidity").all()
     assert forecast["prediction"].between(0.0, 100.0).all()
     assert (Path(experiment_dir) / "bias_correction.json").exists()
+
+
+def test_v2_lightgbm_roundtrip_writes_importance_and_raw_metrics(synthetic_v2_project: dict[str, object]) -> None:
+    pytest.importorskip("lightgbm")
+
+    config = {
+        **synthetic_v2_project["temp_ridge_config"],
+        "experiment": {"name": "synthetic_v2_temp_lgbm", "version": "v2"},
+        "model": {
+            "name": "synthetic_v2_temp_lgbm",
+            "type": "lightgbm",
+            "params": {
+                "n_estimators": 50,
+                "learning_rate": 0.05,
+                "num_leaves": 15,
+            },
+        },
+    }
+    experiment_dir = train_v2_experiment(config)
+
+    metrics_summary = read_table(Path(experiment_dir) / "metrics_target_name.csv")
+    assert not metrics_summary.empty
+    assert (Path(experiment_dir) / "feature_importance.csv").exists()
+    assert (Path(experiment_dir) / "metrics_raw_target_name_horizon_step.csv").exists()

@@ -47,7 +47,9 @@ def write_experiment_summary(
         "prediction_length": data_config["window"]["prediction_length"],
         "train_start": _to_min_datetime(data_config["split"]),
         "train_end": data_config["split"]["train_end"],
+        "val_start": data_config["split"].get("val_start"),
         "val_end": data_config["split"]["val_end"],
+        "test_start": data_config["split"].get("test_start"),
         "test_end": data_config["split"]["test_end"],
         "metrics": metrics,
         "raw_metrics": raw_metrics,
@@ -63,7 +65,7 @@ def write_experiment_summary(
     return json_path, markdown_path
 
 
-def update_leaderboard(experiment_dir: Path, config: dict, metrics: dict[str, object]) -> Path:
+def update_leaderboard(experiment_dir: Path, config: dict, metrics: dict[str, object], raw_metrics: dict[str, object] | None = None) -> Path:
     leaderboard_path = Path(config["artifacts"]["leaderboard_path"])
     leaderboard_path.parent.mkdir(parents=True, exist_ok=True)
     row = {
@@ -74,23 +76,43 @@ def update_leaderboard(experiment_dir: Path, config: dict, metrics: dict[str, ob
         "model_type": config["model"]["type"],
         "encoder_length": config["data"]["window"]["encoder_length"],
         "prediction_length": config["data"]["window"]["prediction_length"],
+        "train_start": config["data"]["split"].get("train_start"),
         "train_end": config["data"]["split"]["train_end"],
+        "val_start": config["data"]["split"].get("val_start"),
         "val_end": config["data"]["split"]["val_end"],
+        "test_start": config["data"]["split"].get("test_start"),
         "test_end": config["data"]["split"]["test_end"],
         "rmse": metrics.get("rmse"),
         "mae": metrics.get("mae"),
         "bias": metrics.get("bias"),
+        "rmse_raw": raw_metrics.get("rmse") if raw_metrics else metrics.get("rmse"),
+        "rmse_corrected": metrics.get("rmse"),
+        "mae_raw": raw_metrics.get("mae") if raw_metrics else metrics.get("mae"),
+        "mae_corrected": metrics.get("mae"),
+        "bias_raw": raw_metrics.get("bias") if raw_metrics else metrics.get("bias"),
+        "bias_corrected": metrics.get("bias"),
         "mape": metrics.get("mape"),
         "notes": config["experiment"].get("notes", ""),
         "experiment_dir": str(experiment_dir),
     }
     if leaderboard_path.exists():
         leaderboard = pd.read_csv(leaderboard_path)
-        leaderboard = pd.concat([leaderboard, pd.DataFrame([row])], ignore_index=True)
+        row_frame = pd.DataFrame([row])
+        for column in leaderboard.columns:
+            if column not in row_frame.columns:
+                row_frame[column] = pd.NA
+        for column in row_frame.columns:
+            if column not in leaderboard.columns:
+                leaderboard[column] = pd.NA
+        leaderboard = pd.concat([leaderboard, row_frame[leaderboard.columns]], ignore_index=True)
     else:
         leaderboard = pd.DataFrame([row])
-    leaderboard = leaderboard.sort_values(["target_name", "rmse", "mae"], na_position="last").reset_index(drop=True)
+    leaderboard = leaderboard.sort_values(["target_name", "rmse_corrected", "mae_corrected"], na_position="last").reset_index(drop=True)
     write_table(leaderboard, leaderboard_path)
+    for target_name, target_frame in leaderboard.groupby("target_name", dropna=False):
+        if pd.isna(target_name):
+            continue
+        write_table(target_frame.reset_index(drop=True), leaderboard_path.with_name(f"leaderboard_{target_name}.csv"))
     return leaderboard_path
 
 
@@ -120,12 +142,22 @@ def _refresh_alias_pointer(experiment_dir: Path, alias_name: str, manifest_key: 
         "experiment_summary.json",
         "experiment_summary.md",
         "forecast_vs_actual.png",
+        "horizon_error.png",
+        "prediction_scatter.png",
+        "raw_vs_corrected.png",
         "experiment_config.yaml",
         "model.pt",
         "training_history.json",
         "bias_correction.json",
         "scaler.json",
         "feature_importance.csv",
+        "worst_case_samples.csv",
+        "metrics_target_name_rolling_origin_fold.csv",
+        "metrics_raw_target_name.csv",
+        "metrics_raw_target_name_horizon_step.csv",
+        "metrics_raw_target_name_station_id.csv",
+        "metrics_raw_target_name_region.csv",
+        "metrics_raw_target_name_season.csv",
     ):
         source = experiment_dir / source_name
         if source.exists():
@@ -145,6 +177,9 @@ def _summary_markdown(summary: dict[str, object]) -> str:
         f"- MAE: {_fmt(metrics.get('mae'))}",
         f"- Bias: {_fmt(metrics.get('bias'))}",
         f"- MAPE: {_fmt(metrics.get('mape'))}",
+        f"- Raw RMSE: {_fmt(dict(summary.get('raw_metrics') or {}).get('rmse'))}",
+        f"- Raw MAE: {_fmt(dict(summary.get('raw_metrics') or {}).get('mae'))}",
+        f"- Raw Bias: {_fmt(dict(summary.get('raw_metrics') or {}).get('bias'))}",
         f"- Best val loss: {_fmt(summary.get('best_val_loss'))}",
         f"- Best epoch: {summary.get('best_epoch')}",
     ]

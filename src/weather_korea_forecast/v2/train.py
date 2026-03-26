@@ -93,7 +93,7 @@ def train_v2_experiment(config: dict) -> Path:
         best_val_loss=best_val_loss,
         training_history=history,
     )
-    update_leaderboard(experiment_dir, config, summary["metrics"])
+    update_leaderboard(experiment_dir, config, summary["metrics"], raw_metrics=raw_metrics)
     refresh_aliases(experiment_dir)
     print(experiment_dir)
     return experiment_dir

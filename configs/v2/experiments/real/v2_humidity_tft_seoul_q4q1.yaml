@@ -1,13 +1,13 @@
 experiment:
-  name: v2_humidity_tft
+  name: v2_humidity_tft_seoul_q4q1
   version: v2
-  notes: "Single-target direct 24h TFT experiment for humidity."
+  notes: "Local real-data bootstrap config for humidity TFT on Seoul 108, 2024-10-01 to 2025-03-24."
 paths:
-  observation_csv: data/raw/asos/asos_multistation_v2.csv
-  era5_csv: data/raw/era5/asos_multistation_v2_station.csv
-  station_metadata_csv: data/raw/metadata/stations_v2.csv
-  output_training_table: data/processed/v2_humidity_direct24/training_table.csv
-  output_data_quality: data/processed/v2_humidity_direct24/data_quality.json
+  observation_csv: data/raw/asos/seoul_20241001_20250324.csv
+  era5_csv: data/raw/era5/seoul_20241001_20250324_station.csv
+  station_metadata_csv: data/raw/metadata/stations.csv
+  output_training_table: data/processed/v2_real_humidity_seoul_q4q1/training_table.csv
+  output_data_quality: data/processed/v2_real_humidity_seoul_q4q1/data_quality.json
 data:
   target_name: humidity
   timezone:
@@ -192,5 +192,5 @@ evaluation:
     enabled: true
     mode: per_horizon
 artifacts:
-  root_dir: data/artifacts/v2_experiments
-  leaderboard_path: data/artifacts/v2_experiments/leaderboard.csv
+  root_dir: data/artifacts/v2_experiments_real
+  leaderboard_path: data/artifacts/v2_experiments_real/leaderboard.csv

@@ -132,9 +132,9 @@ model:
   name: v2_temp_lgbm
   type: lightgbm
   params:
-    n_estimators: 300
-    learning_rate: 0.03
-    num_leaves: 31
+    n_estimators: 100
+    learning_rate: 0.05
+    num_leaves: 15
     subsample: 0.9
     colsample_bytree: 0.9
 training:
@@ -151,4 +151,3 @@ evaluation:
 artifacts:
   root_dir: data/artifacts/v2_experiments
   leaderboard_path: data/artifacts/v2_experiments/leaderboard.csv
-

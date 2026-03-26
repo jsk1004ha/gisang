@@ -38,6 +38,7 @@ def build_v2_training_table(config: dict) -> tuple[pd.DataFrame, dict[str, objec
     merged = add_time_features(merged)
     merged = _ensure_region_columns(merged)
     merged = _add_observation_aliases(merged)
+    merged = _add_physical_features(merged)
     merged["target_value"] = merged[target_name].astype(float)
     merged["target_name"] = target_name
     merged = _fill_raw_continuous_columns(merged, config)
@@ -155,6 +156,25 @@ def _add_observation_aliases(frame: pd.DataFrame) -> pd.DataFrame:
     return enriched
 
 
+def _add_physical_features(frame: pd.DataFrame) -> pd.DataFrame:
+    enriched = frame.copy()
+    if {"temp", "humidity"}.issubset(enriched.columns):
+        temp = enriched["temp"].astype(float)
+        humidity = enriched["humidity"].astype(float).clip(lower=1e-3, upper=100.0)
+        alpha = np.log(humidity / 100.0) + (17.625 * temp) / (243.04 + temp)
+        dew_point = 243.04 * alpha / (17.625 - alpha)
+        enriched["obs_dew_point_c"] = dew_point
+        enriched["obs_dew_point_depression"] = temp - dew_point
+    if {"era5_t2m", "humidity"}.issubset(enriched.columns):
+        era5_temp = enriched["era5_t2m"].astype(float)
+        humidity = enriched["humidity"].astype(float).clip(lower=1e-3, upper=100.0)
+        alpha = np.log(humidity / 100.0) + (17.625 * era5_temp) / (243.04 + era5_temp)
+        era5_dew_point = 243.04 * alpha / (17.625 - alpha)
+        enriched["era5_dew_point_c"] = era5_dew_point
+        enriched["era5_dew_point_depression"] = era5_temp - era5_dew_point
+    return enriched
+
+
 def _fill_raw_continuous_columns(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
     enriched = frame.copy()
     data_config = config["data"]
@@ -188,14 +208,32 @@ def _apply_feature_engineering(frame: pd.DataFrame, config: dict) -> pd.DataFram
         "lag_features",
         {
             "target_value": [1, 3, 6, 12, 24, 48, 72],
+            "obs_temp": [1, 3, 6, 24],
+            "obs_humidity": [1, 3, 6, 24],
             "obs_pressure": [1, 6, 24],
             "obs_wind_speed": [1, 6, 24],
+            "obs_dew_point_c": [1, 3, 6, 24],
+            "obs_dew_point_depression": [1, 3, 6, 24],
             "era5_t2m": [1, 3, 6, 12, 24],
             "era5_sp": [1, 6, 24],
         },
     )
-    rolling_features = feature_config.get("rolling_features", {"target_value": [3, 6, 12, 24]})
-    delta_features = feature_config.get("delta_features", {"target_value": [1, 6, 24]})
+    rolling_features = feature_config.get(
+        "rolling_features",
+        {
+            "target_value": [3, 6, 12, 24],
+            "obs_humidity": [6, 24],
+            "obs_temp": [6, 24],
+        },
+    )
+    delta_features = feature_config.get(
+        "delta_features",
+        {
+            "target_value": [1, 6, 24],
+            "obs_humidity": [1, 6, 24],
+            "obs_temp": [1, 6, 24],
+        },
+    )
 
     grouped = enriched.groupby("station_id", group_keys=False)
     for column, lags in lag_features.items():
@@ -222,6 +260,10 @@ def _apply_feature_engineering(frame: pd.DataFrame, config: dict) -> pd.DataFram
 
     if "target_value_lag_24" in enriched.columns:
         enriched["target_value_same_hour_prev_day"] = enriched["target_value_lag_24"]
+    if "target_value_lag_24" in enriched.columns:
+        enriched["target_value_diff_vs_prev_day"] = enriched["target_value"] - enriched["target_value_lag_24"]
+    if {"obs_humidity", "obs_temp"}.issubset(enriched.columns):
+        enriched["humidity_temp_interaction"] = enriched["obs_humidity"] * enriched["obs_temp"]
     return enriched
 
 

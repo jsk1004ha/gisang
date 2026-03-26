@@ -19,6 +19,8 @@ def add_time_features(df: pd.DataFrame, datetime_col: str = "datetime") -> pd.Da
     frame["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
     frame["doy_sin"] = np.sin(2 * np.pi * dayofyear / 366.0)
     frame["doy_cos"] = np.cos(2 * np.pi * dayofyear / 366.0)
+    frame["month_sin"] = np.sin(2 * np.pi * month / 12.0)
+    frame["month_cos"] = np.cos(2 * np.pi * month / 12.0)
     return frame
 
 
