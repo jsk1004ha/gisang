@@ -47,14 +47,17 @@ def train_experiment(data_config: dict, model_config: dict, train_config: dict) 
         resume_from = train_config.get("training", {}).get("resume_from")
         if resume_from:
             model = _load_trainable_model_for_resume(resume_from, bundle, resolved_model_config)
-        train_result = model.fit(
-            train_loader=train_loader,
-            val_loader=val_loader,
-            max_epochs=int(train_config["training"].get("max_epochs", 5)),
-            learning_rate=float(resolved_model_config["model"].get("learning_rate", 1e-3)),
-            device=train_config["training"].get("device", "cpu"),
-            early_stopping_patience=int(train_config["training"].get("early_stopping_patience", 3)),
-        )
+        fit_kwargs = {
+            "train_loader": train_loader,
+            "val_loader": val_loader,
+            "max_epochs": int(train_config["training"].get("max_epochs", 5)),
+            "learning_rate": float(resolved_model_config["model"].get("learning_rate", 1e-3)),
+            "device": train_config["training"].get("device", "cpu"),
+            "early_stopping_patience": int(train_config["training"].get("early_stopping_patience", 3)),
+        }
+        if resolved_model_config["model"]["type"] == "tft":
+            fit_kwargs["gradient_clip_val"] = float(train_config["training"].get("gradient_clip_val", 0.0))
+        train_result = model.fit(**fit_kwargs)
         history = train_result.history
         best_val_loss = train_result.best_val_loss
         model.save(experiment_dir / "model.pt", extra_state={"bundle_metadata": bundle.metadata})

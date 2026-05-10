@@ -96,6 +96,10 @@ def _legacy_observation_sources(config: dict) -> list[dict]:
                 "column_mapping": config.get("aws_observation_columns", config.get("observation_columns")),
                 "source_tz": aws_config.get("source_tz", default_source_tz),
                 "priority": int(aws_config.get("priority", 1)),
+                "prefer_columns": aws_config.get(
+                    "prefer_columns",
+                    ["humidity", "pressure", "wind_speed", "precipitation", "quality_flag"],
+                ),
                 "resample_rule": aws_config.get("resample_rule"),
                 "aggregation": aws_config.get("aggregation"),
                 "station_id": aws_config.get("station_id"),

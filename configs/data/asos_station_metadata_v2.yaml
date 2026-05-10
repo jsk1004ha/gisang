@@ -1,0 +1,44 @@
+source: datawiki
+inf: SFC
+help: 1
+encoding: euc-kr
+output_path: data/raw/metadata/stations_v2.csv
+stations:
+  - 90
+  - 93
+  - 108
+  - 112
+  - 133
+  - 138
+  - 143
+  - 152
+  - 156
+  - 159
+  - 184
+  - 192
+region_class_map:
+  "90": east_coast
+  "93": mountain_adjacent
+  "108": inland
+  "112": west_coast
+  "133": inland
+  "138": east_coast
+  "143": inland
+  "152": east_coast
+  "156": inland
+  "159": south_coast
+  "184": island
+  "192": south_coast
+coastal_distance_km_map:
+  "90": 0.5
+  "93": 65.0
+  "108": 35.0
+  "112": 1.0
+  "133": 65.0
+  "138": 1.0
+  "143": 55.0
+  "152": 1.0
+  "156": 45.0
+  "159": 1.0
+  "184": 0.5
+  "192": 25.0

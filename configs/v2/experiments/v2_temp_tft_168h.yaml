@@ -150,7 +150,12 @@ training:
 evaluation:
   bias_correction:
     enabled: true
-    mode: per_horizon
+    mode: per_station_horizon
+    method: mean_bias
+    calibration_fraction: 0.7
+    apply_when: improves_on_holdout
+    selection_metric: rmse
+    min_improvement: 0.0
 artifacts:
   root_dir: data/artifacts/v2_experiments
   leaderboard_path: data/artifacts/v2_experiments/leaderboard.csv

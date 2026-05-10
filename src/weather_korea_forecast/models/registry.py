@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from weather_korea_forecast.models.baselines import LightGBMBaseline, PersistenceBaseline, RidgeRegressionBaseline
+from weather_korea_forecast.models.baselines import (
+    HorizonWiseLightGBMBaseline,
+    HorizonWiseRidgeRegressionBaseline,
+    LightGBMBaseline,
+    PersistenceBaseline,
+    ResidualForecastModel,
+    RidgeRegressionBaseline,
+)
 from weather_korea_forecast.models.tft_model import TFTModelWrapper, can_use_pytorch_forecasting
 
 
@@ -25,6 +32,17 @@ def build_model(model_config: dict, bundle):
             target_columns=bundle.target_columns,
             prediction_length=bundle.prediction_length,
             alpha=float(resolved_config["model"].get("alpha", 1.0)),
+            alpha_grid=[float(value) for value in resolved_config["model"].get("alpha_grid", [])] or None,
+            alpha_selection=dict(resolved_config["model"].get("alpha_selection", {})),
+        )
+    if model_type in {"horizon_wise_ridge", "horizonwise_ridge"}:
+        return HorizonWiseRidgeRegressionBaseline(
+            encoder_feature_names=bundle.encoder_columns,
+            target_columns=bundle.target_columns,
+            prediction_length=bundle.prediction_length,
+            alpha=float(resolved_config["model"].get("alpha", 1.0)),
+            alpha_grid=[float(value) for value in resolved_config["model"].get("alpha_grid", [])] or None,
+            alpha_selection=dict(resolved_config["model"].get("alpha_selection", {})),
         )
     if model_type == "lightgbm":
         return LightGBMBaseline(
@@ -32,6 +50,28 @@ def build_model(model_config: dict, bundle):
             target_columns=bundle.target_columns,
             prediction_length=bundle.prediction_length,
             params=dict(resolved_config["model"].get("params", {})),
+        )
+    if model_type in {"horizon_wise_lightgbm", "horizonwise_lightgbm"}:
+        return HorizonWiseLightGBMBaseline(
+            encoder_feature_names=bundle.encoder_columns,
+            target_columns=bundle.target_columns,
+            prediction_length=bundle.prediction_length,
+            params=dict(resolved_config["model"].get("params", {})),
+        )
+    if model_type == "residual":
+        baseline_section = dict(resolved_config["model"].get("baseline", {}))
+        residual_section = dict(resolved_config["model"].get("residual", {}))
+        if not baseline_section or not residual_section:
+            raise ValueError("Residual model requires model.baseline and model.residual sections.")
+        baseline_config = resolve_model_config({"model": baseline_section})
+        residual_config = resolve_model_config({"model": residual_section})
+        if residual_config["model"].get("backend") == "pytorch_forecasting":
+            raise ValueError("Residual forecasting currently supports fallback_torch/baseline residual learners, not pytorch_forecasting residual datasets.")
+        return ResidualForecastModel(
+            baseline_model=build_model(baseline_config, bundle),
+            residual_model=build_model(residual_config, bundle),
+            baseline_config=baseline_config,
+            residual_config=residual_config,
         )
     if model_type == "tft":
         return TFTModelWrapper.from_dataset_bundle(bundle, resolved_config)

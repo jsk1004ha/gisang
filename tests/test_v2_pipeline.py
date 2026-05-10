@@ -8,9 +8,10 @@ import pytest
 
 from weather_korea_forecast.utils.io import read_table
 from weather_korea_forecast.v2.data import build_v2_training_table
+from weather_korea_forecast.v2.dataset import build_v2_dataset_bundle
 from weather_korea_forecast.v2.evaluate import evaluate_experiment
 from weather_korea_forecast.v2.predict import generate_v2_forecast
-from weather_korea_forecast.v2.train import train_v2_experiment
+from weather_korea_forecast.v2.train import apply_postprocessing, compute_bias_correction, train_v2_experiment
 
 
 @pytest.fixture()
@@ -240,6 +241,52 @@ def test_build_v2_training_table_multistation_features(synthetic_v2_project: dic
     assert quality_report["station_count"] == 2
 
 
+def test_v2_feature_engineering_uses_past_only_windows(synthetic_v2_project: dict[str, object]) -> None:
+    training_table, _ = build_v2_training_table(synthetic_v2_project["temp_ridge_config"])
+    station_frame = training_table.loc[training_table["station_id"].astype(str) == "108"].sort_values("datetime").reset_index(drop=True)
+    row_index = 30
+
+    assert station_frame.loc[row_index, "target_value_lag_1"] == pytest.approx(station_frame.loc[row_index - 1, "target_value"])
+    assert station_frame.loc[row_index, "target_value_lag_24"] == pytest.approx(station_frame.loc[row_index - 24, "target_value"])
+    assert station_frame.loc[row_index, "target_value_roll_mean_3"] == pytest.approx(
+        station_frame.loc[row_index - 3 : row_index - 1, "target_value"].mean()
+    )
+    assert station_frame.loc[row_index, "target_value_delta_6"] == pytest.approx(
+        station_frame.loc[row_index, "target_value"] - station_frame.loc[row_index - 6, "target_value"]
+    )
+
+
+def test_v2_stationwise_and_regionwise_scaling_fit_train_groups_only(synthetic_v2_project: dict[str, object]) -> None:
+    training_table, _ = build_v2_training_table(synthetic_v2_project["temp_ridge_config"])
+    config = synthetic_v2_project["temp_ridge_config"]
+
+    station_config = {
+        **config,
+        "data": {
+            **config["data"],
+            "scaling": {**config["data"]["scaling"], "mode": "stationwise", "group_column": "station_id"},
+        },
+    }
+    station_bundle = build_v2_dataset_bundle(training_table, station_config)
+    train_raw = training_table.loc[training_table["split"] == "train"].copy()
+    expected_station_mean = train_raw.loc[train_raw["station_id"].astype(str) == "108", "target_value"].astype(float).mean()
+
+    assert station_bundle.scaler.mode == "station_wise"
+    assert station_bundle.scaler.group_means["target_value"]["108"] == pytest.approx(expected_station_mean)
+    assert station_bundle.scaler.group_means["target_value"]["108"] != pytest.approx(training_table["target_value"].astype(float).mean())
+
+    region_config = {
+        **config,
+        "data": {
+            **config["data"],
+            "scaling": {**config["data"]["scaling"], "mode": "regionwise", "group_column": "region_class"},
+        },
+    }
+    region_bundle = build_v2_dataset_bundle(training_table, region_config)
+    assert region_bundle.scaler.mode == "region_wise"
+    assert set(region_bundle.scaler.group_means["target_value"]) == {"capital", "coastal"}
+
+
 def test_v2_ridge_roundtrip_updates_leaderboard(synthetic_v2_project: dict[str, object]) -> None:
     experiment_dir = train_v2_experiment(synthetic_v2_project["temp_ridge_config"])
     evaluation = evaluate_experiment(experiment_dir)
@@ -255,6 +302,54 @@ def test_v2_ridge_roundtrip_updates_leaderboard(synthetic_v2_project: dict[str, 
     assert "synthetic_v2_temp_ridge" in leaderboard["experiment_name"].tolist()
     assert (Path(experiment_dir) / "metrics_target_name_station_id.csv").exists()
     assert (Path(experiment_dir) / "experiment_summary.md").exists()
+    assert {"scaling_mode", "num_stations", "best_horizon", "worst_horizon", "raw_rmse", "corrected_rmse"}.issubset(leaderboard.columns)
+
+
+def test_v2_horizonwise_ridge_writes_horizon_metrics_and_plots(synthetic_v2_project: dict[str, object]) -> None:
+    config = {
+        **synthetic_v2_project["temp_ridge_config"],
+        "experiment": {"name": "synthetic_v2_temp_horizonwise_ridge", "version": "v2"},
+        "model": {
+            "name": "synthetic_v2_temp_horizonwise_ridge",
+            "type": "horizon_wise_ridge",
+            "alpha": 1.0,
+            "alpha_grid": [0.01, 0.1, 1.0],
+            "alpha_selection": {"metric": "val_mse"},
+        },
+    }
+    experiment_dir = train_v2_experiment(config)
+    horizon_metrics = read_table(Path(experiment_dir) / "horizon_model_metrics.csv")
+
+    assert set(horizon_metrics["horizon_step"]) == set(range(1, config["data"]["window"]["prediction_length"] + 1))
+    assert {"alpha", "val_rmse", "val_mae", "val_bias"}.issubset(horizon_metrics.columns)
+    assert (Path(experiment_dir) / "horizon_station_heatmap.png").exists()
+    assert (Path(experiment_dir) / "station_rmse_bar.png").exists()
+    assert (Path(experiment_dir) / "region_rmse_bar.png").exists()
+    assert (Path(experiment_dir) / "metrics_daily_temperature.csv").exists()
+    assert (Path(experiment_dir) / "worst_case_summary.json").exists()
+
+
+def test_v2_residual_framework_saves_component_predictions(synthetic_v2_project: dict[str, object]) -> None:
+    config = {
+        **synthetic_v2_project["temp_ridge_config"],
+        "experiment": {"name": "synthetic_v2_temp_residual_ridge", "version": "v2"},
+        "model": {
+            "name": "synthetic_v2_temp_residual_ridge",
+            "type": "residual",
+            "baseline": {"name": "baseline_ridge", "type": "ridge", "alpha": 1.0},
+            "residual": {
+                "name": "residual_horizonwise_ridge",
+                "type": "horizon_wise_ridge",
+                "alpha": 0.1,
+                "alpha_grid": [0.1],
+            },
+        },
+    }
+    experiment_dir = train_v2_experiment(config)
+    components = read_table(Path(experiment_dir) / "predictions_test_components.csv")
+
+    assert {"baseline", "residual", "final"}.issubset(set(components["component"]))
+    assert (Path(experiment_dir) / "horizon_model_metrics.csv").exists()
 
 
 def test_v2_tft_roundtrip_for_humidity_with_clipping(synthetic_v2_project: dict[str, object]) -> None:
@@ -298,3 +393,168 @@ def test_v2_lightgbm_roundtrip_writes_importance_and_raw_metrics(synthetic_v2_pr
     assert not metrics_summary.empty
     assert (Path(experiment_dir) / "feature_importance.csv").exists()
     assert (Path(experiment_dir) / "metrics_raw_target_name_horizon_step.csv").exists()
+
+
+def test_bias_correction_holdout_guard_disables_harmful_correction() -> None:
+    config = {
+        "data": {"postprocess": {"clip_prediction": None}},
+        "evaluation": {
+            "bias_correction": {
+                "enabled": True,
+                "mode": "per_horizon",
+                "calibration_fraction": 0.5,
+                "apply_when": "improves_on_holdout",
+            }
+        },
+    }
+    frame = pd.DataFrame(
+        [
+            {
+                "station_id": "108",
+                "prediction_start": "2024-01-01T00:00:00Z",
+                "valid_time": "2024-01-01T01:00:00Z",
+                "horizon_step": 1,
+                "target_name": "temp",
+                "prediction": 12.0,
+                "actual": 10.0,
+            },
+            {
+                "station_id": "108",
+                "prediction_start": "2024-01-02T00:00:00Z",
+                "valid_time": "2024-01-02T01:00:00Z",
+                "horizon_step": 1,
+                "target_name": "temp",
+                "prediction": 10.0,
+                "actual": 10.0,
+            },
+        ]
+    )
+
+    payload = compute_bias_correction(frame, config)
+    corrected = apply_postprocessing(frame, config, payload)
+
+    assert payload["enabled"] is False
+    assert payload["selection"]["accepted"] is False
+    assert corrected["prediction"].tolist() == [12.0, 10.0]
+
+
+def test_bias_correction_holdout_guard_keeps_helpful_correction() -> None:
+    config = {
+        "data": {"postprocess": {"clip_prediction": None}},
+        "evaluation": {
+            "bias_correction": {
+                "enabled": True,
+                "mode": "per_horizon",
+                "calibration_fraction": 0.5,
+                "apply_when": "improves_on_holdout",
+            }
+        },
+    }
+    frame = pd.DataFrame(
+        [
+            {
+                "station_id": "108",
+                "prediction_start": "2024-01-01T00:00:00Z",
+                "valid_time": "2024-01-01T01:00:00Z",
+                "horizon_step": 1,
+                "target_name": "temp",
+                "prediction": 12.0,
+                "actual": 10.0,
+            },
+            {
+                "station_id": "108",
+                "prediction_start": "2024-01-02T00:00:00Z",
+                "valid_time": "2024-01-02T01:00:00Z",
+                "horizon_step": 1,
+                "target_name": "temp",
+                "prediction": 12.0,
+                "actual": 10.0,
+            },
+        ]
+    )
+
+    payload = compute_bias_correction(frame, config)
+    corrected = apply_postprocessing(frame, config, payload)
+
+    assert payload["enabled"] is True
+    assert payload["selection"]["accepted"] is True
+    assert corrected["prediction"].tolist() == [10.0, 10.0]
+
+
+def test_affine_calibration_learns_horizon_slope_and_intercept() -> None:
+    config = {
+        "data": {"postprocess": {"clip_prediction": None}},
+        "evaluation": {
+            "bias_correction": {
+                "enabled": True,
+                "mode": "per_horizon",
+                "method": "affine",
+                "calibration_fraction": 0.5,
+                "apply_when": "improves_on_holdout",
+            }
+        },
+    }
+    rows = []
+    for day in range(1, 5):
+        for prediction in (1.0, 3.0):
+            rows.append(
+                {
+                    "station_id": "108",
+                    "prediction_start": f"2024-01-0{day}T00:00:00Z",
+                    "valid_time": f"2024-01-0{day}T01:00:00Z",
+                    "horizon_step": 1,
+                    "target_name": "temp",
+                    "prediction": prediction,
+                    "actual": 2.0 * prediction + 1.0,
+                }
+            )
+    frame = pd.DataFrame(rows)
+
+    payload = compute_bias_correction(frame, config)
+    corrected = apply_postprocessing(frame, config, payload)
+
+    assert payload["enabled"] is True
+    assert payload["method"] == "affine"
+    assert payload["selection"]["accepted"] is True
+    assert corrected["prediction"].round(6).tolist() == corrected["actual"].round(6).tolist()
+
+
+def test_auto_calibration_selects_best_holdout_candidate() -> None:
+    config = {
+        "data": {"postprocess": {"clip_prediction": None}},
+        "evaluation": {
+            "bias_correction": {
+                "enabled": True,
+                "mode": "auto",
+                "method": "auto",
+                "candidate_modes": ["global", "per_station_horizon"],
+                "candidate_methods": ["mean_bias"],
+                "calibration_fraction": 0.5,
+                "apply_when": "improves_on_holdout",
+            }
+        },
+    }
+    rows = []
+    for day in range(1, 5):
+        for station_id, prediction, actual in (("108", 12.0, 10.0), ("159", 8.0, 10.0)):
+            rows.append(
+                {
+                    "station_id": station_id,
+                    "prediction_start": f"2024-01-0{day}T00:00:00Z",
+                    "valid_time": f"2024-01-0{day}T01:00:00Z",
+                    "horizon_step": 1,
+                    "target_name": "temp",
+                    "prediction": prediction,
+                    "actual": actual,
+                }
+            )
+    frame = pd.DataFrame(rows)
+
+    payload = compute_bias_correction(frame, config)
+    corrected = apply_postprocessing(frame, config, payload)
+
+    assert payload["enabled"] is True
+    assert payload["mode"] == "per_station_horizon"
+    assert payload["method"] == "mean_bias"
+    assert payload["selection"]["selected_mode"] == "per_station_horizon"
+    assert corrected["prediction"].round(6).tolist() == corrected["actual"].round(6).tolist()

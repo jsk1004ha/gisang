@@ -65,7 +65,7 @@ def generate_v2_forecast(
     }
 
     model_type = resolved_model_config["model"]["type"]
-    if model_type in {"persistence", "seasonal_persistence", "ridge", "lightgbm"}:
+    if model_type in {"persistence", "seasonal_persistence", "ridge", "horizon_wise_ridge", "horizonwise_ridge", "lightgbm", "horizon_wise_lightgbm", "horizonwise_lightgbm", "residual"}:
         predictor = build_model(resolved_model_config, bundle).load(experiment_path / "model.pt", bundle, resolved_model_config)
         prediction, _, _ = predictor.predict_loader([batch])
     elif resolved_model_config["model"].get("backend") == "pytorch_forecasting":
@@ -83,9 +83,10 @@ def generate_v2_forecast(
         prediction, _, _ = wrapper.predict_loader([batch], device=inference_device)
 
     rows = []
+    scaler_group = _scaler_group_for_forecast(normalized_station_id, encoder_frame, bundle)
     for horizon_index in range(prediction.shape[1]):
         raw_prediction = float(prediction[0, horizon_index, 0].item())
-        prediction_value = float(bundle.scaler.inverse_values("target_value", [raw_prediction], groups=[normalized_station_id])[0])
+        prediction_value = float(bundle.scaler.inverse_values("target_value", [raw_prediction], groups=[scaler_group])[0])
         rows.append(
             {
                 "station_id": normalized_station_id,
@@ -166,6 +167,17 @@ def _complete_decoder_columns(decoder_frame: pd.DataFrame, bundle: V2DatasetBund
         if column not in completed.columns:
             completed[column] = float(base_row[column])
     return completed
+
+
+def _scaler_group_for_forecast(station_id: str, encoder_frame: pd.DataFrame, bundle: V2DatasetBundle) -> str:
+    group_column = getattr(bundle.scaler, "group_column", "station_id")
+    if group_column == "station_id":
+        return station_id
+    if group_column in encoder_frame.columns:
+        return str(encoder_frame.iloc[-1][group_column])
+    if group_column == "region" and "region_class" in encoder_frame.columns:
+        return str(encoder_frame.iloc[-1]["region_class"])
+    return station_id
 
 
 def _ensure_utc_timestamp(value) -> pd.Timestamp:

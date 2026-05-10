@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from weather_korea_forecast.v2.scaling import SplitAwareScaler, fit_split_aware_scaler
+from weather_korea_forecast.v2.scaling import SplitAwareScaler, fit_split_aware_scaler, normalize_scaling_mode
 
 
 @dataclass
@@ -125,14 +125,20 @@ def build_v2_dataset_bundle(training_table: pd.DataFrame, config: dict, backend:
     prediction_length = int(data_config["window"]["prediction_length"])
     scaling_config = data_config.get("scaling", {})
     scaling_columns = [column for column in scaling_config.get("columns", []) if column in frame.columns]
-    scaling_mode = str(scaling_config.get("mode", "global"))
+    scaling_mode = normalize_scaling_mode(str(scaling_config.get("mode", "global")))
+    scaling_group_column = str(
+        scaling_config.get(
+            "group_column",
+            "region_class" if scaling_mode == "region_wise" else "station_id",
+        )
+    )
 
     train_frame_raw = frame.loc[frame["split"] == "train"].copy()
     scaler = fit_split_aware_scaler(
         train_frame=train_frame_raw,
         columns=scaling_columns,
         mode=scaling_mode,
-        group_column=str(scaling_config.get("group_column", "station_id")),
+        group_column=scaling_group_column,
     )
     frame = scaler.transform(frame, scaling_columns)
 
@@ -162,6 +168,8 @@ def build_v2_dataset_bundle(training_table: pd.DataFrame, config: dict, backend:
 
     metadata: dict[str, Any] = {
         "scaling_columns": scaling_columns,
+        "scaling_mode": scaling_mode,
+        "scaling_group_column": scaling_group_column,
         "category_levels": category_levels,
         "static_baseline_columns": static_baseline_columns,
         "dropped_row_count": before_drop - len(frame),

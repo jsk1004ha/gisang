@@ -74,11 +74,15 @@ class RidgeRegressionBaseline:
         target_columns: list[str],
         prediction_length: int,
         alpha: float = 1.0,
+        alpha_grid: list[float] | None = None,
+        alpha_selection: dict[str, Any] | None = None,
     ) -> None:
         self.encoder_feature_names = encoder_feature_names
         self.target_columns = target_columns
         self.prediction_length = prediction_length
         self.alpha = alpha
+        self.alpha_grid = alpha_grid
+        self.alpha_selection = alpha_selection or {}
         self.weights: torch.Tensor | None = None
         self.bias: torch.Tensor | None = None
 
@@ -92,13 +96,55 @@ class RidgeRegressionBaseline:
         early_stopping_patience: int = 3,
     ) -> BaselineTrainResult:
         train_features, train_targets = _collect_regression_tensors(train_loader)
-        val_features, val_targets = _collect_regression_tensors(val_loader)
+        val_features, val_targets, val_metadata = _collect_regression_tensors_with_metadata(val_loader)
+        selection_metric = str(self.alpha_selection.get("metric", "val_mse"))
 
-        self.weights, self.bias = _solve_ridge_regression(train_features, train_targets, self.alpha)
+        history: list[dict[str, float | str]] = []
+        best_candidate: tuple[float, float, float, float, torch.Tensor, torch.Tensor] | None = None
+        for candidate_alpha in _candidate_alphas(self.alpha, self.alpha_grid):
+            weights, bias = _solve_ridge_regression(train_features, train_targets, candidate_alpha)
+            train_loss = _mse_loss(_predict_from_regression_features(train_features, weights, bias), train_targets)
+            val_prediction = _predict_from_regression_features(val_features, weights, bias)
+            val_loss = _mse_loss(val_prediction, val_targets)
+            selection_loss = _ridge_alpha_selection_loss(
+                prediction=val_prediction,
+                target=val_targets,
+                metadata=val_metadata,
+                prediction_length=self.prediction_length,
+                target_count=len(self.target_columns),
+                selection_config=self.alpha_selection,
+                default_val_loss=val_loss,
+            )
+            history_row: dict[str, float | str] = {
+                "epoch": "closed_form_alpha_search",
+                "alpha": candidate_alpha,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+            }
+            if selection_metric != "val_mse":
+                history_row["selection_metric"] = selection_metric
+                history_row["selection_loss"] = selection_loss
+            history.append(history_row)
+            if best_candidate is None or selection_loss < best_candidate[1]:
+                best_candidate = (candidate_alpha, selection_loss, val_loss, train_loss, weights, bias)
+
+        if best_candidate is None:
+            raise RuntimeError("No ridge alpha candidates were available.")
+        self.alpha, selection_loss, val_loss, train_loss, self.weights, self.bias = best_candidate
+        selected_row: dict[str, float | str] = {
+            "epoch": "closed_form_selected",
+            "alpha": self.alpha,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+        }
+        if selection_metric != "val_mse":
+            selected_row["selection_metric"] = selection_metric
+            selected_row["selection_loss"] = selection_loss
+        history.append(selected_row)
         train_loss = _mse_loss(self._predict_from_features(train_features), train_targets)
         val_loss = _mse_loss(self._predict_from_features(val_features), val_targets)
         return BaselineTrainResult(
-            history=[{"epoch": "closed_form", "train_loss": train_loss, "val_loss": val_loss}],
+            history=history,
             best_val_loss=val_loss,
         )
 
@@ -109,12 +155,13 @@ class RidgeRegressionBaseline:
     def predict_loader(self, loader, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
         predictions: list[torch.Tensor] = []
         targets: list[torch.Tensor] = []
-        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": []}
+        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": [], "region_class": []}
         for batch in loader:
             predictions.append(self.predict_batch(batch).cpu())
             targets.append(batch["target"].cpu())
             metadata["station_id"].extend(batch["station_id"])
             metadata["prediction_start"].extend(batch["prediction_start"])
+            metadata["region_class"].extend(batch.get("region_class", []))
         return torch.cat(predictions), torch.cat(targets), metadata
 
     def save(self, path: str | Path, extra_state: dict[str, Any] | None = None) -> Path:
@@ -126,6 +173,8 @@ class RidgeRegressionBaseline:
             "weights": self.weights,
             "bias": self.bias,
             "alpha": self.alpha,
+            "alpha_grid": self.alpha_grid,
+            "alpha_selection": self.alpha_selection,
             "extra_state": extra_state or {},
         }
         torch.save(payload, path)
@@ -135,11 +184,15 @@ class RidgeRegressionBaseline:
     def load(cls, path: str | Path, bundle, model_config: dict | None = None) -> "RidgeRegressionBaseline":
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         alpha = float((model_config or {}).get("model", {}).get("alpha", checkpoint.get("alpha", 1.0)))
+        alpha_grid = (model_config or {}).get("model", {}).get("alpha_grid", checkpoint.get("alpha_grid"))
+        alpha_selection = (model_config or {}).get("model", {}).get("alpha_selection", checkpoint.get("alpha_selection", {}))
         model = cls(
             encoder_feature_names=bundle.encoder_columns,
             target_columns=bundle.target_columns,
             prediction_length=bundle.prediction_length,
             alpha=alpha,
+            alpha_grid=[float(value) for value in alpha_grid] if alpha_grid else None,
+            alpha_selection=dict(alpha_selection or {}),
         )
         model.weights = checkpoint["weights"].cpu()
         model.bias = checkpoint["bias"].cpu()
@@ -175,6 +228,159 @@ class RidgeRegressionBaseline:
                     )
                 output_index += 1
         return pd.DataFrame(rows).sort_values(["target_column", "horizon_step", "abs_coefficient"], ascending=[True, True, False])
+
+
+class HorizonWiseRidgeRegressionBaseline(RidgeRegressionBaseline):
+    """Closed-form ridge baseline with independent alpha/model per horizon output."""
+
+    def __init__(
+        self,
+        encoder_feature_names: list[str],
+        target_columns: list[str],
+        prediction_length: int,
+        alpha: float = 1.0,
+        alpha_grid: list[float] | None = None,
+        alpha_selection: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            encoder_feature_names=encoder_feature_names,
+            target_columns=target_columns,
+            prediction_length=prediction_length,
+            alpha=alpha,
+            alpha_grid=alpha_grid,
+            alpha_selection=alpha_selection,
+        )
+        self.horizon_alphas: dict[str, float] = {}
+        self.horizon_metrics: list[dict[str, float | str | int]] = []
+
+    def fit(
+        self,
+        train_loader,
+        val_loader,
+        max_epochs: int,
+        learning_rate: float,
+        device: str = "cpu",
+        early_stopping_patience: int = 3,
+    ) -> BaselineTrainResult:
+        train_features, train_targets = _collect_regression_tensors(train_loader)
+        val_features, val_targets = _collect_regression_tensors(val_loader)
+        target_count = len(self.target_columns)
+        output_count = self.prediction_length * target_count
+        self.weights = torch.zeros((train_features.shape[1], output_count), dtype=train_features.dtype)
+        self.bias = torch.zeros(output_count, dtype=train_features.dtype)
+        history: list[dict[str, float | str]] = []
+        self.horizon_alphas = {}
+        self.horizon_metrics = []
+
+        for output_index in range(output_count):
+            horizon_step = output_index // target_count + 1
+            target_column = self.target_columns[output_index % target_count]
+            train_target = train_targets[:, output_index : output_index + 1]
+            val_target = val_targets[:, output_index : output_index + 1]
+            best_candidate: tuple[float, float, float, float, torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
+            for candidate_alpha in _candidate_alphas(self.alpha, self.alpha_grid):
+                weights, bias = _solve_ridge_regression(train_features, train_target, candidate_alpha)
+                train_prediction = _predict_from_regression_features(train_features, weights, bias)
+                val_prediction = _predict_from_regression_features(val_features, weights, bias)
+                train_loss = _mse_loss(train_prediction, train_target)
+                val_loss = _mse_loss(val_prediction, val_target)
+                history.append(
+                    {
+                        "epoch": "horizon_alpha_search",
+                        "target_column": target_column,
+                        "horizon_step": float(horizon_step),
+                        "alpha": float(candidate_alpha),
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                    }
+                )
+                if best_candidate is None or val_loss < best_candidate[1]:
+                    best_candidate = (candidate_alpha, val_loss, val_loss, train_loss, weights, bias, val_prediction)
+
+            if best_candidate is None:
+                raise RuntimeError("No horizon-wise ridge alpha candidates were available.")
+            candidate_alpha, selection_loss, val_loss, train_loss, weights, bias, val_prediction = best_candidate
+            self.weights[:, output_index] = weights[:, 0]
+            self.bias[output_index] = bias[0]
+            key = f"{target_column}:h{horizon_step}"
+            self.horizon_alphas[key] = float(candidate_alpha)
+            error = val_prediction.reshape(-1) - val_target.reshape(-1)
+            self.horizon_metrics.append(
+                {
+                    "target_column": target_column,
+                    "horizon_step": horizon_step,
+                    "alpha": float(candidate_alpha),
+                    "val_rmse": float(torch.sqrt(torch.mean(torch.square(error))).item()),
+                    "val_mae": float(torch.mean(torch.abs(error)).item()),
+                    "val_bias": float(torch.mean(error).item()),
+                    "val_loss": float(val_loss),
+                    "train_loss": float(train_loss),
+                    "selection_loss": float(selection_loss),
+                }
+            )
+            history.append(
+                {
+                    "epoch": "horizon_alpha_selected",
+                    "target_column": target_column,
+                    "horizon_step": float(horizon_step),
+                    "alpha": float(candidate_alpha),
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                }
+            )
+
+        val_loss = _mse_loss(self._predict_from_features(val_features), val_targets)
+        train_loss = _mse_loss(self._predict_from_features(train_features), train_targets)
+        history.append({"epoch": "horizon_wise_closed_form_selected", "train_loss": train_loss, "val_loss": val_loss})
+        return BaselineTrainResult(history=history, best_val_loss=val_loss)
+
+    def save(self, path: str | Path, extra_state: dict[str, Any] | None = None) -> Path:
+        if self.weights is None or self.bias is None:
+            raise RuntimeError("HorizonWiseRidgeRegressionBaseline must be fit before saving.")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "weights": self.weights,
+            "bias": self.bias,
+            "alpha": self.alpha,
+            "alpha_grid": self.alpha_grid,
+            "alpha_selection": self.alpha_selection,
+            "horizon_alphas": self.horizon_alphas,
+            "horizon_metrics": self.horizon_metrics,
+            "extra_state": extra_state or {},
+        }
+        torch.save(payload, path)
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path, bundle, model_config: dict | None = None) -> "HorizonWiseRidgeRegressionBaseline":
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        alpha = float((model_config or {}).get("model", {}).get("alpha", checkpoint.get("alpha", 1.0)))
+        alpha_grid = (model_config or {}).get("model", {}).get("alpha_grid", checkpoint.get("alpha_grid"))
+        alpha_selection = (model_config or {}).get("model", {}).get("alpha_selection", checkpoint.get("alpha_selection", {}))
+        model = cls(
+            encoder_feature_names=bundle.encoder_columns,
+            target_columns=bundle.target_columns,
+            prediction_length=bundle.prediction_length,
+            alpha=alpha,
+            alpha_grid=[float(value) for value in alpha_grid] if alpha_grid else None,
+            alpha_selection=dict(alpha_selection or {}),
+        )
+        model.weights = checkpoint["weights"].cpu()
+        model.bias = checkpoint["bias"].cpu()
+        model.horizon_alphas = {str(key): float(value) for key, value in dict(checkpoint.get("horizon_alphas", {})).items()}
+        model.horizon_metrics = [dict(row) for row in checkpoint.get("horizon_metrics", [])]
+        return model
+
+    @classmethod
+    def load_for_resume(cls, path: str | Path, bundle, model_config: dict | None = None) -> "HorizonWiseRidgeRegressionBaseline":
+        return cls.load(path, bundle, model_config)
+
+    def horizon_metrics_frame(self) -> pd.DataFrame | None:
+        if not self.horizon_metrics:
+            return None
+        return pd.DataFrame(self.horizon_metrics).sort_values(["target_column", "horizon_step"])
 
 
 class LightGBMBaseline:
@@ -228,12 +434,13 @@ class LightGBMBaseline:
     def predict_loader(self, loader, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
         predictions: list[torch.Tensor] = []
         targets: list[torch.Tensor] = []
-        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": []}
+        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": [], "region_class": []}
         for batch in loader:
             predictions.append(self.predict_batch(batch))
             targets.append(batch["target"].cpu())
             metadata["station_id"].extend(batch["station_id"])
             metadata["prediction_start"].extend(batch["prediction_start"])
+            metadata["region_class"].extend(batch.get("region_class", []))
         return torch.cat(predictions), torch.cat(targets), metadata
 
     def save(self, path: str | Path, extra_state: dict[str, Any] | None = None) -> Path:
@@ -293,6 +500,246 @@ class LightGBMBaseline:
         return pd.DataFrame(rows).sort_values(["target_column", "horizon_step", "importance"], ascending=[True, True, False])
 
 
+class HorizonWiseLightGBMBaseline(LightGBMBaseline):
+    """Explicit horizon-wise LightGBM alias.
+
+    LightGBM uses ``MultiOutputRegressor`` under the hood, so each horizon/target
+    output already receives an independent estimator. This class keeps that
+    behavior while exposing horizon-wise validation metrics as a first-class
+    artifact for V2 experiments.
+    """
+
+    def __init__(
+        self,
+        encoder_feature_names: list[str],
+        target_columns: list[str],
+        prediction_length: int,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            encoder_feature_names=encoder_feature_names,
+            target_columns=target_columns,
+            prediction_length=prediction_length,
+            params=params,
+        )
+        self.horizon_metrics: list[dict[str, float | str | int]] = []
+
+    def fit(
+        self,
+        train_loader,
+        val_loader,
+        max_epochs: int,
+        learning_rate: float,
+        device: str = "cpu",
+        early_stopping_patience: int = 3,
+    ) -> BaselineTrainResult:
+        result = super().fit(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            max_epochs=max_epochs,
+            learning_rate=learning_rate,
+            device=device,
+            early_stopping_patience=early_stopping_patience,
+        )
+        val_features, val_targets = _collect_regression_tensors(val_loader)
+        val_prediction = torch.tensor(
+            self.model.predict(_features_to_frame(val_features, self.feature_names)),
+            dtype=torch.float32,
+        )
+        self.horizon_metrics = _horizon_output_metrics(
+            prediction=val_prediction,
+            target=val_targets,
+            target_columns=self.target_columns,
+            prediction_length=self.prediction_length,
+        )
+        return result
+
+    def save(self, path: str | Path, extra_state: dict[str, Any] | None = None) -> Path:
+        if self.model is None:
+            raise RuntimeError("HorizonWiseLightGBMBaseline must be fit before saving.")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "model": self.model,
+            "params": self.params,
+            "feature_names": self.feature_names,
+            "horizon_metrics": self.horizon_metrics,
+            "extra_state": extra_state or {},
+        }
+        torch.save(payload, path)
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path, bundle, model_config: dict | None = None) -> "HorizonWiseLightGBMBaseline":
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        params = dict((model_config or {}).get("model", {}).get("params", checkpoint.get("params", {})))
+        model = cls(
+            encoder_feature_names=bundle.encoder_columns,
+            target_columns=bundle.target_columns,
+            prediction_length=bundle.prediction_length,
+            params=params,
+        )
+        model.model = checkpoint["model"]
+        model.feature_names = checkpoint.get("feature_names")
+        model.horizon_metrics = [dict(row) for row in checkpoint.get("horizon_metrics", [])]
+        return model
+
+    @classmethod
+    def load_for_resume(cls, path: str | Path, bundle, model_config: dict | None = None) -> "HorizonWiseLightGBMBaseline":
+        return cls.load(path, bundle, model_config)
+
+    def horizon_metrics_frame(self) -> pd.DataFrame | None:
+        if not self.horizon_metrics:
+            return None
+        return pd.DataFrame(self.horizon_metrics).sort_values(["target_column", "horizon_step"])
+
+
+class ResidualForecastModel:
+    """Two-stage forecast: baseline prediction plus residual model prediction."""
+
+    def __init__(
+        self,
+        baseline_model: Any,
+        residual_model: Any,
+        baseline_config: dict[str, Any],
+        residual_config: dict[str, Any],
+    ) -> None:
+        self.baseline_model = baseline_model
+        self.residual_model = residual_model
+        self.baseline_config = baseline_config
+        self.residual_config = residual_config
+
+    def fit(
+        self,
+        train_loader,
+        val_loader,
+        max_epochs: int,
+        learning_rate: float,
+        device: str = "cpu",
+        early_stopping_patience: int = 3,
+        **kwargs: Any,
+    ) -> BaselineTrainResult:
+        baseline_result = _fit_component_model(
+            self.baseline_model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            max_epochs=max_epochs,
+            learning_rate=learning_rate,
+            device=device,
+            early_stopping_patience=early_stopping_patience,
+            **kwargs,
+        )
+        residual_train_loader = _materialize_residual_batches(train_loader, self.baseline_model)
+        residual_val_loader = _materialize_residual_batches(val_loader, self.baseline_model)
+        residual_result = _fit_component_model(
+            self.residual_model,
+            train_loader=residual_train_loader,
+            val_loader=residual_val_loader,
+            max_epochs=max_epochs,
+            learning_rate=learning_rate,
+            device=device,
+            early_stopping_patience=early_stopping_patience,
+            **kwargs,
+        )
+        final_val_loss = _loader_mse_for_model(self, val_loader)
+        history = _prefixed_history("baseline", baseline_result.history) + _prefixed_history("residual", residual_result.history)
+        history.append({"component": "final", "epoch": "residual_forecast_selected", "val_loss": final_val_loss})
+        return BaselineTrainResult(history=history, best_val_loss=final_val_loss)
+
+    def predict_batch(self, batch: dict) -> torch.Tensor:
+        return self.baseline_model.predict_batch(batch) + self.residual_model.predict_batch(batch)
+
+    def predict_components_batch(self, batch: dict) -> dict[str, torch.Tensor]:
+        baseline = self.baseline_model.predict_batch(batch)
+        residual = self.residual_model.predict_batch(batch)
+        return {"baseline": baseline, "residual": residual, "final": baseline + residual}
+
+    def predict_loader(self, loader, device: str = "cpu") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
+        predictions: list[torch.Tensor] = []
+        targets: list[torch.Tensor] = []
+        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": [], "region_class": []}
+        for batch in loader:
+            predictions.append(self.predict_batch(batch).cpu())
+            targets.append(batch["target"].cpu())
+            metadata["station_id"].extend(batch["station_id"])
+            metadata["prediction_start"].extend(batch["prediction_start"])
+            metadata["region_class"].extend(batch.get("region_class", []))
+        return torch.cat(predictions), torch.cat(targets), metadata
+
+    def predict_components_loader(self, loader, device: str = "cpu") -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, list[Any]]]:
+        component_predictions: dict[str, list[torch.Tensor]] = {"baseline": [], "residual": [], "final": []}
+        targets: list[torch.Tensor] = []
+        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": [], "region_class": []}
+        for batch in loader:
+            components = self.predict_components_batch(batch)
+            for name, tensor in components.items():
+                component_predictions[name].append(tensor.cpu())
+            targets.append(batch["target"].cpu())
+            metadata["station_id"].extend(batch["station_id"])
+            metadata["prediction_start"].extend(batch["prediction_start"])
+            metadata["region_class"].extend(batch.get("region_class", []))
+        return {name: torch.cat(tensors) for name, tensors in component_predictions.items()}, torch.cat(targets), metadata
+
+    def save(self, path: str | Path, extra_state: dict[str, Any] | None = None) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "baseline_model": self.baseline_model,
+                "residual_model": self.residual_model,
+                "baseline_config": self.baseline_config,
+                "residual_config": self.residual_config,
+                "extra_state": extra_state or {},
+            },
+            path,
+        )
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path, bundle, model_config: dict | None = None) -> "ResidualForecastModel":
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        return cls(
+            baseline_model=checkpoint["baseline_model"],
+            residual_model=checkpoint["residual_model"],
+            baseline_config=dict(checkpoint.get("baseline_config", {})),
+            residual_config=dict(checkpoint.get("residual_config", {})),
+        )
+
+    @classmethod
+    def load_for_resume(cls, path: str | Path, bundle, model_config: dict | None = None) -> "ResidualForecastModel":
+        return cls.load(path, bundle, model_config)
+
+    def feature_importance_frame(self, feature_names: list[str]) -> pd.DataFrame | None:
+        frames: list[pd.DataFrame] = []
+        for component_name, model in (("baseline", self.baseline_model), ("residual", self.residual_model)):
+            if not hasattr(model, "feature_importance_frame"):
+                continue
+            frame = model.feature_importance_frame(feature_names)
+            if frame is None or frame.empty:
+                continue
+            frame = frame.copy()
+            frame.insert(0, "component", component_name)
+            frames.append(frame)
+        if not frames:
+            return None
+        return pd.concat(frames, ignore_index=True)
+
+    def horizon_metrics_frame(self) -> pd.DataFrame | None:
+        frames: list[pd.DataFrame] = []
+        for component_name, model in (("baseline", self.baseline_model), ("residual", self.residual_model)):
+            if not hasattr(model, "horizon_metrics_frame"):
+                continue
+            frame = model.horizon_metrics_frame()
+            if frame is None or frame.empty:
+                continue
+            frame = frame.copy()
+            frame.insert(0, "component", component_name)
+            frames.append(frame)
+        if not frames:
+            return None
+        return pd.concat(frames, ignore_index=True)
+
+
 def _default_target_source_features(target_columns: list[str], encoder_feature_names: list[str]) -> list[str]:
     source_features: list[str] = []
     for target_column in target_columns:
@@ -320,6 +767,19 @@ def _collect_regression_tensors(loader) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.cat(feature_rows, dim=0), torch.cat(target_rows, dim=0)
 
 
+def _collect_regression_tensors_with_metadata(loader) -> tuple[torch.Tensor, torch.Tensor, dict[str, list[Any]]]:
+    feature_rows: list[torch.Tensor] = []
+    target_rows: list[torch.Tensor] = []
+    metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": [], "region_class": []}
+    for batch in loader:
+        feature_rows.append(_flatten_batch_features(batch))
+        target_rows.append(batch["target"].reshape(batch["target"].shape[0], -1).cpu())
+        metadata["station_id"].extend([str(value) for value in batch.get("station_id", [])])
+        metadata["prediction_start"].extend(batch.get("prediction_start", []))
+        metadata["region_class"].extend([str(value) for value in batch.get("region_class", [])])
+    return torch.cat(feature_rows, dim=0), torch.cat(target_rows, dim=0), metadata
+
+
 def _flatten_batch_features(batch: dict) -> torch.Tensor:
     encoder = batch["encoder_cont"].reshape(batch["encoder_cont"].shape[0], -1).cpu()
     decoder = batch["decoder_known"].reshape(batch["decoder_known"].shape[0], -1).cpu()
@@ -338,8 +798,146 @@ def _solve_ridge_regression(features: torch.Tensor, targets: torch.Tensor, alpha
     return coefficients[:-1], coefficients[-1]
 
 
+def _candidate_alphas(alpha: float, alpha_grid: list[float] | None) -> list[float]:
+    candidates = [float(value) for value in (alpha_grid or [alpha])]
+    if alpha not in candidates:
+        candidates.append(float(alpha))
+    unique = sorted({value for value in candidates if value >= 0.0})
+    if not unique:
+        raise ValueError("Ridge alpha candidates must include at least one non-negative value.")
+    return unique
+
+
+def _predict_from_regression_features(features: torch.Tensor, weights: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+    return features @ weights + bias
+
+
 def _mse_loss(prediction: torch.Tensor, target: torch.Tensor) -> float:
     return float(torch.mean(torch.square(prediction.reshape(target.shape) - target)).item())
+
+
+def _ridge_alpha_selection_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    metadata: dict[str, list[Any]],
+    prediction_length: int,
+    target_count: int,
+    selection_config: dict[str, Any],
+    default_val_loss: float,
+) -> float:
+    metric = str(selection_config.get("metric", "val_mse"))
+    if metric in {"val_mse", "mse"}:
+        return default_val_loss
+    if metric != "bias_corrected_holdout_mse":
+        raise ValueError(f"Unsupported ridge alpha selection metric: {metric}")
+
+    calibration_fraction = float(selection_config.get("calibration_fraction", 0.7))
+    if calibration_fraction <= 0.0 or calibration_fraction > 1.0:
+        raise ValueError("model.alpha_selection.calibration_fraction must be in the interval (0, 1].")
+    if calibration_fraction >= 1.0 or prediction.shape[0] < 2:
+        return default_val_loss
+
+    frame = _ridge_validation_frame(
+        prediction=prediction,
+        target=target,
+        metadata=metadata,
+        prediction_length=prediction_length,
+        target_count=target_count,
+    )
+    if frame.empty:
+        return default_val_loss
+    calibration, holdout = _split_alpha_selection_frame(frame, calibration_fraction)
+    if calibration.empty or holdout.empty:
+        return default_val_loss
+
+    raw_loss = _frame_mse(holdout["prediction"], holdout["actual"])
+    corrected = _apply_validation_mean_bias(
+        calibration=calibration,
+        holdout=holdout,
+        mode=str(selection_config.get("correction_mode", "per_station_horizon")),
+    )
+    corrected_loss = _frame_mse(corrected["prediction"], corrected["actual"])
+    if bool(selection_config.get("apply_when_improves", True)):
+        return min(raw_loss, corrected_loss)
+    return corrected_loss
+
+
+def _ridge_validation_frame(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    metadata: dict[str, list[Any]],
+    prediction_length: int,
+    target_count: int,
+) -> pd.DataFrame:
+    prediction_tensor = prediction.reshape(prediction.shape[0], prediction_length, target_count).detach().cpu()
+    target_tensor = target.reshape(target.shape[0], prediction_length, target_count).detach().cpu()
+    station_ids = [str(value) for value in metadata.get("station_id", [])]
+    prediction_starts = metadata.get("prediction_start", [])
+    rows: list[dict[str, object]] = []
+    for sample_index in range(prediction_tensor.shape[0]):
+        station_id = station_ids[sample_index] if sample_index < len(station_ids) else ""
+        prediction_start = _metadata_timestamp(prediction_starts[sample_index]) if sample_index < len(prediction_starts) else pd.NaT
+        for horizon_index in range(prediction_length):
+            for target_index in range(target_count):
+                rows.append(
+                    {
+                        "station_id": station_id,
+                        "prediction_start": prediction_start,
+                        "horizon_step": horizon_index + 1,
+                        "target_index": target_index,
+                        "prediction": float(prediction_tensor[sample_index, horizon_index, target_index].item()),
+                        "actual": float(target_tensor[sample_index, horizon_index, target_index].item()),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def _metadata_timestamp(value: Any) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def _split_alpha_selection_frame(frame: pd.DataFrame, calibration_fraction: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ordered = frame.sort_values(["prediction_start", "station_id", "horizon_step", "target_index"]).reset_index(drop=True)
+    starts = pd.Series(pd.to_datetime(ordered["prediction_start"], utc=True).dropna().sort_values().unique())
+    if len(starts) < 2:
+        split_index = max(1, min(len(ordered) - 1, int(round(len(ordered) * calibration_fraction))))
+        return ordered.iloc[:split_index].copy(), ordered.iloc[split_index:].copy()
+    split_start_count = max(1, min(len(starts) - 1, int(round(len(starts) * calibration_fraction))))
+    cutoff = starts.iloc[split_start_count - 1]
+    row_starts = pd.to_datetime(ordered["prediction_start"], utc=True)
+    return ordered.loc[row_starts <= cutoff].copy(), ordered.loc[row_starts > cutoff].copy()
+
+
+def _apply_validation_mean_bias(calibration: pd.DataFrame, holdout: pd.DataFrame, mode: str) -> pd.DataFrame:
+    group_columns = _alpha_selection_group_columns(mode)
+    bias = (
+        calibration.assign(bias=calibration["prediction"].astype(float) - calibration["actual"].astype(float))
+        .groupby(group_columns, dropna=False)["bias"]
+        .mean()
+        .reset_index()
+    )
+    corrected = holdout.merge(bias, on=group_columns, how="left")
+    corrected["prediction"] = corrected["prediction"].astype(float) - corrected["bias"].fillna(0.0).astype(float)
+    return corrected
+
+
+def _alpha_selection_group_columns(mode: str) -> list[str]:
+    if mode == "global":
+        return ["target_index"]
+    if mode == "per_horizon":
+        return ["target_index", "horizon_step"]
+    if mode == "per_station_horizon":
+        return ["target_index", "station_id", "horizon_step"]
+    raise ValueError(f"Unsupported ridge alpha selection correction_mode: {mode}")
+
+
+def _frame_mse(prediction: pd.Series, actual: pd.Series) -> float:
+    prediction_values = prediction.astype(float).to_numpy()
+    actual_values = actual.astype(float).to_numpy()
+    return float(((prediction_values - actual_values) ** 2).mean())
 
 
 def _build_lightgbm_regressor(params: dict[str, Any]):
@@ -368,3 +966,84 @@ def _features_to_frame(features: torch.Tensor, feature_names: list[str] | None) 
     if not feature_names:
         return feature_array
     return pd.DataFrame(feature_array, columns=feature_names)
+
+
+def _horizon_output_metrics(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    target_columns: list[str],
+    prediction_length: int,
+) -> list[dict[str, float | str | int]]:
+    prediction = prediction.reshape(target.shape)
+    target_count = len(target_columns)
+    rows: list[dict[str, float | str | int]] = []
+    for output_index in range(prediction_length * target_count):
+        horizon_step = output_index // target_count + 1
+        target_column = target_columns[output_index % target_count]
+        error = prediction[:, output_index].reshape(-1) - target[:, output_index].reshape(-1)
+        rows.append(
+            {
+                "target_column": target_column,
+                "horizon_step": horizon_step,
+                "val_rmse": float(torch.sqrt(torch.mean(torch.square(error))).item()),
+                "val_mae": float(torch.mean(torch.abs(error)).item()),
+                "val_bias": float(torch.mean(error).item()),
+                "val_loss": float(torch.mean(torch.square(error)).item()),
+            }
+        )
+    return rows
+
+
+def _fit_component_model(
+    model: Any,
+    train_loader,
+    val_loader,
+    max_epochs: int,
+    learning_rate: float,
+    device: str,
+    early_stopping_patience: int,
+    **kwargs: Any,
+) -> BaselineTrainResult:
+    if hasattr(model, "fit"):
+        return model.fit(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            max_epochs=max_epochs,
+            learning_rate=learning_rate,
+            device=device,
+            early_stopping_patience=early_stopping_patience,
+            **kwargs,
+        )
+    return BaselineTrainResult(history=[], best_val_loss=_loader_mse_for_model(model, val_loader))
+
+
+def _materialize_residual_batches(loader, baseline_model: Any) -> list[dict[str, Any]]:
+    residual_batches: list[dict[str, Any]] = []
+    with torch.no_grad():
+        for batch in loader:
+            baseline_prediction = baseline_model.predict_batch(batch).detach().cpu()
+            residual_batch: dict[str, Any] = {}
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor):
+                    residual_batch[key] = value.detach().cpu().clone()
+                else:
+                    residual_batch[key] = value
+            residual_batch["target"] = batch["target"].detach().cpu() - baseline_prediction
+            residual_batches.append(residual_batch)
+    return residual_batches
+
+
+def _loader_mse_for_model(model: Any, loader) -> float:
+    predictions: list[torch.Tensor] = []
+    targets: list[torch.Tensor] = []
+    with torch.no_grad():
+        for batch in loader:
+            predictions.append(model.predict_batch(batch).detach().cpu())
+            targets.append(batch["target"].detach().cpu())
+    if not predictions:
+        return float("nan")
+    return _mse_loss(torch.cat(predictions), torch.cat(targets))
+
+
+def _prefixed_history(component: str, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"component": component, **dict(row)} for row in history]

@@ -10,3 +10,7 @@ model:
   dropout: 0.1
   hidden_continuous_size: 16
   learning_rate: 0.001
+  # fallback_torch 전용: 마지막 관측값을 기본 예측선으로 두고 보정량을 학습한다.
+  residual_baseline: true
+  target_source_features:
+    - obs_temp

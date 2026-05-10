@@ -174,11 +174,12 @@ model:
   name: v2_humidity_lgbm
   type: lightgbm
   params:
-    n_estimators: 100
-    learning_rate: 0.05
-    num_leaves: 15
+    n_estimators: 10
+    learning_rate: 0.08
+    num_leaves: 7
     subsample: 0.9
     colsample_bytree: 0.9
+    n_jobs: 8
 training:
   batch_size: 64
   max_epochs: 1
@@ -189,7 +190,12 @@ training:
 evaluation:
   bias_correction:
     enabled: true
-    mode: per_horizon
+    mode: per_station_horizon
+    method: mean_bias
+    calibration_fraction: 0.7
+    apply_when: improves_on_holdout
+    selection_metric: rmse
+    min_improvement: 0.0
 artifacts:
   root_dir: data/artifacts/v2_experiments
   leaderboard_path: data/artifacts/v2_experiments/leaderboard.csv

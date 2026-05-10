@@ -51,3 +51,5 @@ result/
 data/raw/
 data/interim/
 data/processed/
+
+.omx

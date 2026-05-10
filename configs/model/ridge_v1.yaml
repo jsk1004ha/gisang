@@ -2,6 +2,7 @@ model:
   name: ridge_v1
   type: ridge
   alpha: 1.0
+  alpha_grid: [0.01, 0.1, 1.0, 10.0, 100.0]
   target_columns:
     - target_temp
     - target_humidity

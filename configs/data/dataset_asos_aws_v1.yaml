@@ -20,6 +20,12 @@ observation_columns:
 aws:
   source_tz: Asia/Seoul
   priority: 1
+  prefer_columns:
+    - humidity
+    - pressure
+    - wind_speed
+    - precipitation
+    - quality_flag
   resample_rule: 1h
   aggregation:
     temp: mean

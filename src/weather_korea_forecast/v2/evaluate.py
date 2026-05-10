@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -30,10 +33,19 @@ def evaluate_prediction_frame(predictions: pd.DataFrame, experiment_dir: str | P
 
     worst_cases = predictions.assign(abs_error=lambda df: (df["prediction"] - df["actual"]).abs()).sort_values("abs_error", ascending=False).head(100)
     write_table(worst_cases, experiment_path / "worst_case_samples.csv")
+    write_json(build_worst_case_summary(predictions), experiment_path / "worst_case_summary.json")
+    daily_reports = build_daily_temperature_reports(predictions)
+    for name, report in daily_reports.items():
+        write_table(report, experiment_path / f"{name}.csv")
     plot_forecast_vs_actual(predictions, experiment_path / "forecast_vs_actual.png")
     plot_horizon_error(predictions, experiment_path / "horizon_error.png")
     plot_prediction_scatter(predictions, experiment_path / "prediction_scatter.png")
     plot_raw_vs_corrected(predictions, experiment_path / "raw_vs_corrected.png")
+    plot_horizon_station_heatmap(predictions, experiment_path / "horizon_station_heatmap.png")
+    plot_group_rmse_bar(predictions, "station_id", experiment_path / "station_rmse_bar.png", title="Station RMSE")
+    plot_group_rmse_bar(predictions, "region", experiment_path / "region_rmse_bar.png", title="Region RMSE")
+    plot_daily_max_min_error(daily_reports.get("daily_temperature_errors", pd.DataFrame()), experiment_path / "daily_max_min_error.png")
+    plot_extreme_temperature_scatter(predictions, experiment_path / "extreme_temperature_scatter.png")
     rolling_origin = build_rolling_origin_reports(predictions)
     for name, report in rolling_origin.items():
         write_table(report, experiment_path / f"metrics_{name}.csv")
@@ -70,6 +82,99 @@ def build_v2_breakdown_reports(predictions: pd.DataFrame) -> dict[str, pd.DataFr
         if all(column in normalized.columns for column in group_columns):
             reports["_".join(group_columns)] = compute_group_metrics(normalized, group_columns)
     return reports
+
+
+def build_daily_temperature_reports(predictions: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if predictions.empty or "valid_time" not in predictions.columns:
+        return {}
+    frame = predictions.copy()
+    frame["valid_time"] = pd.to_datetime(frame["valid_time"], utc=True)
+    frame["valid_date"] = frame["valid_time"].dt.date.astype(str)
+    group_columns = [column for column in ["target_name", "station_id", "valid_date"] if column in frame.columns]
+    if "station_id" not in group_columns:
+        group_columns.append("valid_date")
+    grouped = frame.groupby(group_columns, dropna=False)
+    rows: list[dict[str, object]] = []
+    for group_key, group in grouped:
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+        row = {column: value for column, value in zip(group_columns, group_key)}
+        actual = group["actual"].astype(float)
+        prediction = group["prediction"].astype(float)
+        row.update(
+            {
+                "actual_max": float(actual.max()),
+                "prediction_max": float(prediction.max()),
+                "max_error": float(prediction.max() - actual.max()),
+                "actual_min": float(actual.min()),
+                "prediction_min": float(prediction.min()),
+                "min_error": float(prediction.min() - actual.min()),
+                "actual_diurnal_range": float(actual.max() - actual.min()),
+                "prediction_diurnal_range": float(prediction.max() - prediction.min()),
+                "diurnal_range_error": float((prediction.max() - prediction.min()) - (actual.max() - actual.min())),
+                "sample_count": int(len(group)),
+            }
+        )
+        rows.append(row)
+    errors = pd.DataFrame(rows)
+    if errors.empty:
+        return {}
+    metric_rows = []
+    for metric_name, error_column in (
+        ("daily_max_temp", "max_error"),
+        ("daily_min_temp", "min_error"),
+        ("diurnal_range", "diurnal_range_error"),
+    ):
+        values = errors[error_column].astype(float).to_numpy()
+        metric_rows.append(
+            {
+                "metric": metric_name,
+                "rmse": float(np.sqrt(np.mean(np.square(values)))),
+                "mae": float(np.mean(np.abs(values))),
+                "bias": float(np.mean(values)),
+                "sample_count": int(len(values)),
+            }
+        )
+    return {
+        "daily_temperature_errors": errors,
+        "metrics_daily_temperature": pd.DataFrame(metric_rows),
+    }
+
+
+def build_worst_case_summary(predictions: pd.DataFrame) -> dict[str, object]:
+    if predictions.empty:
+        return {"sample_count": 0}
+    frame = predictions.copy()
+    frame["abs_error"] = (frame["prediction"].astype(float) - frame["actual"].astype(float)).abs()
+    frame["valid_time"] = pd.to_datetime(frame["valid_time"], utc=True) if "valid_time" in frame.columns else pd.NaT
+    frame["hour_of_day"] = frame["valid_time"].dt.hour if "valid_time" in frame.columns else pd.NA
+    summary: dict[str, object] = {
+        "sample_count": int(len(frame)),
+        "max_abs_error": float(frame["abs_error"].max()),
+    }
+    for column in ["horizon_step", "station_id", "region", "season", "hour_of_day"]:
+        if column not in frame.columns:
+            continue
+        metrics = compute_group_metrics(frame, [column])
+        if metrics.empty or "rmse" not in metrics.columns:
+            continue
+        worst = metrics.sort_values("rmse", ascending=False).iloc[0].to_dict()
+        summary[f"worst_{column}"] = _json_safe_row(worst)
+    return summary
+
+
+def _json_safe_row(row: dict[str, object]) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    for key, value in row.items():
+        if pd.isna(value):
+            safe[key] = None
+        elif isinstance(value, (np.integer,)):
+            safe[key] = int(value)
+        elif isinstance(value, (np.floating,)):
+            safe[key] = float(value)
+        else:
+            safe[key] = value
+    return safe
 
 
 def build_v2_raw_breakdown_reports(predictions: pd.DataFrame) -> dict[str, pd.DataFrame]:
@@ -165,6 +270,105 @@ def plot_raw_vs_corrected(predictions: pd.DataFrame, output_path: str | Path) ->
     axis.tick_params(axis="x", rotation=30)
     axis.legend()
     axis.set_title("Raw vs Corrected Prediction")
+    figure.tight_layout()
+    figure.savefig(path)
+    plt.close(figure)
+    return path
+
+
+def plot_horizon_station_heatmap(predictions: pd.DataFrame, output_path: str | Path) -> Path | None:
+    if predictions.empty or not {"station_id", "horizon_step"}.issubset(predictions.columns):
+        return None
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    metrics = compute_group_metrics(predictions, ["station_id", "horizon_step"])
+    if metrics.empty:
+        return None
+    heatmap = metrics.pivot(index="station_id", columns="horizon_step", values="rmse").sort_index()
+    figure, axis = plt.subplots(figsize=(max(8, heatmap.shape[1] * 0.35), max(4, heatmap.shape[0] * 0.35)))
+    image = axis.imshow(heatmap.to_numpy(dtype=float), aspect="auto", cmap="magma")
+    axis.set_xticks(range(len(heatmap.columns)))
+    axis.set_xticklabels([str(column) for column in heatmap.columns], rotation=90)
+    axis.set_yticks(range(len(heatmap.index)))
+    axis.set_yticklabels([str(index) for index in heatmap.index])
+    axis.set_xlabel("Horizon step")
+    axis.set_ylabel("Station")
+    axis.set_title("Station x Horizon RMSE")
+    figure.colorbar(image, ax=axis, label="RMSE")
+    figure.tight_layout()
+    figure.savefig(path)
+    plt.close(figure)
+    return path
+
+
+def plot_group_rmse_bar(predictions: pd.DataFrame, group_column: str, output_path: str | Path, title: str) -> Path | None:
+    if predictions.empty:
+        return None
+    normalized = predictions.copy()
+    if group_column not in normalized.columns:
+        if group_column == "region" and "region_class" in normalized.columns:
+            normalized["region"] = normalized["region_class"]
+        else:
+            return None
+    metrics = compute_group_metrics(normalized, [group_column]).sort_values("rmse", ascending=False)
+    if metrics.empty:
+        return None
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(max(6, len(metrics) * 0.6), 4))
+    axis.bar(metrics[group_column].astype(str), metrics["rmse"].astype(float))
+    axis.tick_params(axis="x", rotation=45)
+    axis.set_ylabel("RMSE")
+    axis.set_title(title)
+    figure.tight_layout()
+    figure.savefig(path)
+    plt.close(figure)
+    return path
+
+
+def plot_daily_max_min_error(daily_errors: pd.DataFrame, output_path: str | Path) -> Path | None:
+    if daily_errors.empty or "valid_date" not in daily_errors.columns:
+        return None
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plot_frame = daily_errors.sort_values("valid_date").copy()
+    plot_frame["label"] = plot_frame["valid_date"].astype(str)
+    if "station_id" in plot_frame.columns and plot_frame["station_id"].nunique() > 1:
+        plot_frame = plot_frame.groupby("valid_date", as_index=False)[["max_error", "min_error", "diurnal_range_error"]].mean()
+        plot_frame["label"] = plot_frame["valid_date"].astype(str)
+    figure, axis = plt.subplots(figsize=(10, 4))
+    axis.plot(plot_frame["label"], plot_frame["max_error"], marker="o", label="daily max error")
+    axis.plot(plot_frame["label"], plot_frame["min_error"], marker="o", label="daily min error")
+    axis.plot(plot_frame["label"], plot_frame["diurnal_range_error"], marker="o", label="diurnal range error")
+    axis.axhline(0.0, color="black", linewidth=0.8)
+    axis.tick_params(axis="x", rotation=45)
+    axis.legend()
+    axis.set_title("Daily Temperature Error")
+    figure.tight_layout()
+    figure.savefig(path)
+    plt.close(figure)
+    return path
+
+
+def plot_extreme_temperature_scatter(predictions: pd.DataFrame, output_path: str | Path) -> Path | None:
+    if predictions.empty:
+        return None
+    actual = predictions["actual"].astype(float)
+    lower = actual.quantile(0.1)
+    upper = actual.quantile(0.9)
+    extreme = predictions.loc[(actual <= lower) | (actual >= upper)].copy()
+    if extreme.empty:
+        return None
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(5, 5))
+    axis.scatter(extreme["actual"], extreme["prediction"], s=12, alpha=0.6)
+    min_value = float(min(extreme["actual"].min(), extreme["prediction"].min()))
+    max_value = float(max(extreme["actual"].max(), extreme["prediction"].max()))
+    axis.plot([min_value, max_value], [min_value, max_value], color="black", linewidth=1.0)
+    axis.set_xlabel("Actual")
+    axis.set_ylabel("Prediction")
+    axis.set_title("Extreme Actual Quantiles Scatter")
     figure.tight_layout()
     figure.savefig(path)
     plt.close(figure)

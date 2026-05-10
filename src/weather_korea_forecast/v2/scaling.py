@@ -19,15 +19,16 @@ class SplitAwareScaler:
     def transform(self, df: pd.DataFrame, columns: list[str] | None = None) -> pd.DataFrame:
         frame = df.copy()
         target_columns = [column for column in (columns or self.columns) if column in frame.columns]
-        if self.mode == "none":
+        mode = normalize_scaling_mode(self.mode)
+        if mode == "none":
             return frame
 
-        if self.mode == "global":
+        if mode == "global":
             for column in target_columns:
                 frame[column] = (frame[column].astype(float) - self.global_means[column]) / self.global_stds[column]
             return frame
 
-        if self.mode == "station_wise":
+        if mode in {"station_wise", "region_wise"}:
             groups = frame[self.group_column].astype(str)
             for column in target_columns:
                 mean_map = pd.Series(self.group_means.get(column, {}), dtype=float)
@@ -41,9 +42,10 @@ class SplitAwareScaler:
 
     def inverse_values(self, column: str, values, groups=None):
         array = np.asarray(values, dtype=float)
-        if self.mode == "none" or column not in self.columns:
+        mode = normalize_scaling_mode(self.mode)
+        if mode == "none" or column not in self.columns:
             return array
-        if self.mode == "global" or groups is None:
+        if mode == "global" or groups is None:
             return array * self.global_stds[column] + self.global_means[column]
 
         group_values = pd.Series(groups).astype(str)
@@ -55,7 +57,7 @@ class SplitAwareScaler:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "mode": self.mode,
+            "mode": normalize_scaling_mode(self.mode),
             "columns": self.columns,
             "group_column": self.group_column,
             "global_means": self.global_means,
@@ -83,12 +85,29 @@ class SplitAwareScaler:
         )
 
 
+def normalize_scaling_mode(mode: str | None) -> str:
+    normalized = str(mode or "global").strip().lower().replace("-", "_")
+    aliases = {
+        "off": "none",
+        "disabled": "none",
+        "no": "none",
+        "stationwise": "station_wise",
+        "station": "station_wise",
+        "station_group": "station_wise",
+        "regionwise": "region_wise",
+        "region": "region_wise",
+        "region_group": "region_wise",
+    }
+    return aliases.get(normalized, normalized)
+
+
 def fit_split_aware_scaler(
     train_frame: pd.DataFrame,
     columns: list[str],
     mode: str = "global",
     group_column: str = "station_id",
 ) -> SplitAwareScaler:
+    mode = normalize_scaling_mode(mode)
     existing_columns = [column for column in columns if column in train_frame.columns]
     global_means: dict[str, float] = {}
     global_stds: dict[str, float] = {}
@@ -101,7 +120,9 @@ def fit_split_aware_scaler(
         std = float(series.std(ddof=0))
         global_stds[column] = std if std > 0 else 1.0
 
-        if mode == "station_wise":
+        if mode in {"station_wise", "region_wise"}:
+            if group_column not in train_frame.columns:
+                raise ValueError(f"Scaling mode '{mode}' requires group column '{group_column}' to be present.")
             grouped = train_frame.groupby(group_column)[column].agg(["mean", "std"]).reset_index()
             grouped["std"] = grouped["std"].fillna(0.0).replace(0.0, 1.0)
             group_means[column] = {

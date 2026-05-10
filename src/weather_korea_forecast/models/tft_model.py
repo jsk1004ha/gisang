@@ -19,11 +19,22 @@ class FallbackSeqForecaster(nn.Module):
         target_dim: int,
         hidden_size: int,
         dropout: float,
+        residual_source_indices: list[int] | None = None,
+        residual_scale: float = 1.0,
     ) -> None:
         super().__init__()
         input_dim = encoder_length * encoder_dim + decoder_length * decoder_dim + static_dim
         self.decoder_length = decoder_length
         self.target_dim = target_dim
+        self.residual_scale = residual_scale
+        residual_indices = residual_source_indices or []
+        if residual_indices and len(residual_indices) != target_dim:
+            raise ValueError("Residual source index count must match target_dim.")
+        self.register_buffer(
+            "residual_source_indices",
+            torch.tensor(residual_indices, dtype=torch.long),
+            persistent=False,
+        )
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_size),
             nn.ReLU(),
@@ -43,7 +54,11 @@ class FallbackSeqForecaster(nn.Module):
             flattened.append(static_real.reshape(batch_size, -1))
         x = torch.cat(flattened, dim=1)
         output = self.network(x)
-        return output.reshape(batch_size, self.decoder_length, self.target_dim)
+        forecast = output.reshape(batch_size, self.decoder_length, self.target_dim)
+        if self.residual_source_indices.numel() > 0:
+            residual_base = encoder_cont[:, -1, self.residual_source_indices].unsqueeze(1)
+            forecast = forecast + self.residual_scale * residual_base.expand(-1, self.decoder_length, -1)
+        return forecast
 
 
 @dataclass
@@ -66,15 +81,19 @@ class TFTModelWrapper:
         if backend == "pytorch_forecasting":
             return cls(_build_pytorch_forecasting_model(bundle, model_config), backend, model_config, bundle=bundle)
 
+        residual_source_indices = _resolve_residual_source_indices(bundle, model_config)
+        static_columns = _bundle_static_columns(bundle)
         model = FallbackSeqForecaster(
             encoder_length=bundle.encoder_length,
             encoder_dim=len(bundle.encoder_columns),
             decoder_length=bundle.prediction_length,
             decoder_dim=len(bundle.decoder_columns),
-            static_dim=len(bundle.static_columns),
+            static_dim=len(static_columns),
             target_dim=len(bundle.target_columns),
             hidden_size=int(model_config["model"].get("hidden_size", 32)),
             dropout=float(model_config["model"].get("dropout", 0.1)),
+            residual_source_indices=residual_source_indices,
+            residual_scale=float(model_config["model"].get("residual_scale", 1.0)),
         )
         return cls(model=model, backend=backend, config=model_config, bundle=bundle)
 
@@ -119,7 +138,8 @@ class TFTModelWrapper:
                 gradient_clip_val=gradient_clip_val,
             )
 
-        self.model.to(device)
+        torch_device = _resolve_torch_device(device)
+        self.model.to(torch_device)
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         criterion = nn.MSELoss()
         history: list[dict[str, float]] = []
@@ -129,8 +149,24 @@ class TFTModelWrapper:
         stale_epochs = 0
 
         for epoch in range(1, max_epochs + 1):
-            train_loss = _run_epoch(self.model, train_loader, optimizer, criterion, device, train=True)
-            val_loss = _run_epoch(self.model, val_loader, optimizer, criterion, device, train=False)
+            train_loss = _run_epoch(
+                self.model,
+                train_loader,
+                optimizer,
+                criterion,
+                torch_device,
+                train=True,
+                gradient_clip_val=gradient_clip_val,
+            )
+            val_loss = _run_epoch(
+                self.model,
+                val_loader,
+                optimizer,
+                criterion,
+                torch_device,
+                train=False,
+                gradient_clip_val=0.0,
+            )
             history.append({"epoch": float(epoch), "train_loss": train_loss, "val_loss": val_loss})
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -163,24 +199,26 @@ class TFTModelWrapper:
                     targets.append(target_target)
                     if metadata is None:
                         metadata = target_metadata
-                return torch.cat(predictions, dim=-1), torch.cat(targets, dim=-1), metadata or {"station_id": [], "prediction_start": []}
+                return torch.cat(predictions, dim=-1), torch.cat(targets, dim=-1), metadata or {"station_id": [], "prediction_start": [], "region_class": []}
             return _predict_with_lightning(self.model, loader, self.bundle, device=device)
 
-        self.model.to(device)
+        torch_device = _resolve_torch_device(device)
+        self.model.to(torch_device)
         self.model.eval()
         predictions: list[torch.Tensor] = []
         targets: list[torch.Tensor] = []
-        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": []}
+        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": [], "region_class": []}
         with torch.no_grad():
             for batch in loader:
-                encoder = batch["encoder_cont"].to(device)
-                decoder = batch["decoder_known"].to(device)
-                static_real = batch["static_real"].to(device)
+                encoder = batch["encoder_cont"].to(torch_device)
+                decoder = batch["decoder_known"].to(torch_device)
+                static_real = batch["static_real"].to(torch_device)
                 preds = self.model(encoder, decoder, static_real).cpu()
                 predictions.append(preds)
                 targets.append(batch["target"].cpu())
                 metadata["station_id"].extend(batch["station_id"])
                 metadata["prediction_start"].extend(batch["prediction_start"])
+                metadata["region_class"].extend(batch.get("region_class", []))
         return torch.cat(predictions), torch.cat(targets), metadata
 
     def save(self, path: str | Path, extra_state: dict[str, Any] | None = None) -> Path:
@@ -217,6 +255,7 @@ def _run_epoch(
     criterion: nn.Module,
     device: str,
     train: bool,
+    gradient_clip_val: float = 0.0,
 ) -> float:
     if len(loader) == 0:
         return float("nan")
@@ -233,9 +272,70 @@ def _run_epoch(
         loss = criterion(prediction, target)
         if train:
             loss.backward()
+            if gradient_clip_val > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
             optimizer.step()
         losses.append(float(loss.detach().cpu()))
     return sum(losses) / len(losses)
+
+
+def _resolve_torch_device(device: str) -> str:
+    normalized = str(device).lower()
+    if normalized == "gpu":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if normalized == "cuda" or normalized.startswith("cuda:"):
+        return normalized if torch.cuda.is_available() else "cpu"
+    return normalized
+
+
+def _resolve_residual_source_indices(bundle: Any, model_config: dict[str, Any]) -> list[int]:
+    model_section = model_config["model"]
+    residual_policy = model_section.get("residual_baseline", "auto")
+    if _is_disabled_residual_policy(residual_policy):
+        return []
+
+    target_source_features = model_section.get("target_source_features")
+    try:
+        source_features = target_source_features or _infer_target_source_features(bundle.target_columns, bundle.encoder_columns)
+    except ValueError:
+        if _is_required_residual_policy(residual_policy):
+            raise
+        return []
+    return [_resolve_feature_index(feature_name, bundle.encoder_columns) for feature_name in source_features]
+
+
+def _bundle_static_columns(bundle: Any) -> list[str]:
+    return list(getattr(bundle, "static_columns", getattr(bundle, "static_baseline_columns", [])))
+
+
+def _infer_target_source_features(target_columns: list[str], encoder_columns: list[str]) -> list[str]:
+    source_features: list[str] = []
+    for target_column in target_columns:
+        base_name = target_column.replace("target_", "", 1)
+        candidates = [f"obs_{base_name}", target_column, base_name]
+        feature_name = next((candidate for candidate in candidates if candidate in encoder_columns), None)
+        if feature_name is None:
+            raise ValueError(f"Could not infer fallback residual source feature for target column: {target_column}")
+        source_features.append(feature_name)
+    return source_features
+
+
+def _resolve_feature_index(feature_name: str, encoder_columns: list[str]) -> int:
+    if feature_name not in encoder_columns:
+        raise ValueError(f"Residual source feature '{feature_name}' is not available in encoder columns.")
+    return encoder_columns.index(feature_name)
+
+
+def _is_disabled_residual_policy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    return str(value).lower() in {"0", "false", "off", "disabled", "none", "no"}
+
+
+def _is_required_residual_policy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"1", "true", "on", "enabled", "required", "yes"}
 
 
 def _build_pytorch_forecasting_model(bundle: Any, model_config: dict[str, Any]) -> Any:
@@ -338,7 +438,7 @@ def _predict_with_lightning(model: Any, loader: Any, bundle: Any, device: str = 
         raise RuntimeError("Dataset bundle is required for pytorch_forecasting predictions.")
 
     time_lookup = (
-        bundle.test_frame[["station_id", "time_idx", "datetime"]]
+        bundle.test_frame[["station_id", "time_idx", "datetime", "region_class"]]
         .drop_duplicates()
         .rename(columns={"time_idx": "prediction_time_idx", "datetime": "prediction_start"})
     )
@@ -347,6 +447,7 @@ def _predict_with_lightning(model: Any, loader: Any, bundle: Any, device: str = 
     metadata = {
         "station_id": index_frame["station_id"].tolist(),
         "prediction_start": index_frame["prediction_start"].astype(str).tolist(),
+        "region_class": index_frame.get("region_class", "").tolist() if "region_class" in index_frame.columns else [],
     }
     return output.cpu(), target.cpu(), metadata
 

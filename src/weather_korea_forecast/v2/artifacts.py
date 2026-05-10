@@ -68,29 +68,51 @@ def write_experiment_summary(
 def update_leaderboard(experiment_dir: Path, config: dict, metrics: dict[str, object], raw_metrics: dict[str, object] | None = None) -> Path:
     leaderboard_path = Path(config["artifacts"]["leaderboard_path"])
     leaderboard_path.parent.mkdir(parents=True, exist_ok=True)
+    split = config["data"]["split"]
+    horizon_extrema = _leaderboard_horizon_extrema(experiment_dir)
+    num_stations = _leaderboard_station_count(experiment_dir)
+    scaling_config = config["data"].get("scaling", {})
+    scaling_mode = str(scaling_config.get("mode", "global"))
     row = {
         "experiment_name": config["experiment"]["name"],
         "version": config["experiment"].get("version", "v2"),
+        "target": config["data"]["target_name"],
         "target_name": config["data"]["target_name"],
         "model_name": config["model"]["name"],
         "model_type": config["model"]["type"],
         "encoder_length": config["data"]["window"]["encoder_length"],
         "prediction_length": config["data"]["window"]["prediction_length"],
-        "train_start": config["data"]["split"].get("train_start"),
-        "train_end": config["data"]["split"]["train_end"],
-        "val_start": config["data"]["split"].get("val_start"),
-        "val_end": config["data"]["split"]["val_end"],
-        "test_start": config["data"]["split"].get("test_start"),
-        "test_end": config["data"]["split"]["test_end"],
+        "scaling_mode": scaling_mode,
+        "scaling_group_column": scaling_config.get("group_column", "station_id"),
+        "num_stations": num_stations,
+        "train_start": split.get("train_start"),
+        "train_end": split["train_end"],
+        "val_start": split.get("val_start"),
+        "val_end": split["val_end"],
+        "test_start": split.get("test_start"),
+        "test_end": split["test_end"],
+        "train_period": _format_period(split.get("train_start"), split.get("train_end")),
+        "val_period": _format_period(split.get("val_start"), split.get("val_end")),
+        "test_period": _format_period(split.get("test_start"), split.get("test_end")),
         "rmse": metrics.get("rmse"),
         "mae": metrics.get("mae"),
         "bias": metrics.get("bias"),
+        "raw_rmse": raw_metrics.get("rmse") if raw_metrics else metrics.get("rmse"),
+        "corrected_rmse": metrics.get("rmse"),
         "rmse_raw": raw_metrics.get("rmse") if raw_metrics else metrics.get("rmse"),
         "rmse_corrected": metrics.get("rmse"),
+        "raw_mae": raw_metrics.get("mae") if raw_metrics else metrics.get("mae"),
+        "corrected_mae": metrics.get("mae"),
         "mae_raw": raw_metrics.get("mae") if raw_metrics else metrics.get("mae"),
         "mae_corrected": metrics.get("mae"),
+        "raw_bias": raw_metrics.get("bias") if raw_metrics else metrics.get("bias"),
+        "corrected_bias": metrics.get("bias"),
         "bias_raw": raw_metrics.get("bias") if raw_metrics else metrics.get("bias"),
         "bias_corrected": metrics.get("bias"),
+        "best_horizon": horizon_extrema.get("best_horizon"),
+        "worst_horizon": horizon_extrema.get("worst_horizon"),
+        "best_horizon_rmse": horizon_extrema.get("best_horizon_rmse"),
+        "worst_horizon_rmse": horizon_extrema.get("worst_horizon_rmse"),
         "mape": metrics.get("mape"),
         "notes": config["experiment"].get("notes", ""),
         "experiment_dir": str(experiment_dir),
@@ -151,7 +173,22 @@ def _refresh_alias_pointer(experiment_dir: Path, alias_name: str, manifest_key: 
         "bias_correction.json",
         "scaler.json",
         "feature_importance.csv",
+        "horizon_model_metrics.csv",
+        "predictions_test_components.csv",
         "worst_case_samples.csv",
+        "worst_case_summary.json",
+        "metrics_target_name.csv",
+        "metrics_target_name_horizon_step.csv",
+        "metrics_target_name_station_id.csv",
+        "metrics_target_name_region.csv",
+        "metrics_target_name_season.csv",
+        "metrics_daily_temperature.csv",
+        "daily_temperature_errors.csv",
+        "horizon_station_heatmap.png",
+        "station_rmse_bar.png",
+        "region_rmse_bar.png",
+        "daily_max_min_error.png",
+        "extreme_temperature_scatter.png",
         "metrics_target_name_rolling_origin_fold.csv",
         "metrics_raw_target_name.csv",
         "metrics_raw_target_name_horizon_step.csv",
@@ -241,3 +278,40 @@ def _fmt(value) -> str:
         return f"{float(value):.4f}"
     except (TypeError, ValueError):
         return "n/a"
+
+
+def _format_period(start, end) -> str:
+    return f"{start or 'begin'}..{end or 'open'}"
+
+
+def _leaderboard_horizon_extrema(experiment_dir: Path) -> dict[str, object]:
+    horizon_path = experiment_dir / "metrics_target_name_horizon_step.csv"
+    if not horizon_path.exists():
+        return {}
+    try:
+        horizon_metrics = pd.read_csv(horizon_path)
+    except Exception:
+        return {}
+    if horizon_metrics.empty or "horizon_step" not in horizon_metrics.columns or "rmse" not in horizon_metrics.columns:
+        return {}
+    best_row = horizon_metrics.sort_values("rmse", ascending=True).iloc[0]
+    worst_row = horizon_metrics.sort_values("rmse", ascending=False).iloc[0]
+    return {
+        "best_horizon": int(best_row["horizon_step"]),
+        "best_horizon_rmse": float(best_row["rmse"]),
+        "worst_horizon": int(worst_row["horizon_step"]),
+        "worst_horizon_rmse": float(worst_row["rmse"]),
+    }
+
+
+def _leaderboard_station_count(experiment_dir: Path) -> int | None:
+    predictions_path = experiment_dir / "predictions_test.csv"
+    if not predictions_path.exists():
+        return None
+    try:
+        predictions = pd.read_csv(predictions_path, usecols=["station_id"])
+    except Exception:
+        return None
+    if "station_id" not in predictions.columns:
+        return None
+    return int(predictions["station_id"].nunique())

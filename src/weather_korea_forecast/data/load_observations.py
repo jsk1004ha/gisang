@@ -90,6 +90,7 @@ def load_observation_sources(
             source_name=name,
         ).copy()
         frame["_priority"] = int(source.get("priority", index))
+        frame["_prefer_columns"] = [tuple(source.get("prefer_columns") or [])] * len(frame)
         frames.append(frame)
 
     combined = pd.concat(frames, ignore_index=True, sort=False)
@@ -99,7 +100,8 @@ def load_observation_sources(
 def _merge_observation_frames(frame: pd.DataFrame) -> pd.DataFrame:
     keys = ["station_id", "datetime"]
     ordered = frame.sort_values(keys + ["_priority"]).reset_index(drop=True)
-    value_columns = [column for column in ordered.columns if column not in keys + ["_priority"]]
+    control_columns = keys + ["_priority", "_prefer_columns"]
+    value_columns = [column for column in ordered.columns if column not in control_columns]
 
     merged_rows: list[dict[str, Any]] = []
     for (station_id, timestamp), group in ordered.groupby(keys, sort=True):
@@ -108,7 +110,7 @@ def _merge_observation_frames(frame: pd.DataFrame) -> pd.DataFrame:
             if column == "observation_source":
                 row[column] = _first_non_empty_string(group[column])
             else:
-                row[column] = _first_non_null(group[column])
+                row[column] = _first_preferred_non_null(group, column)
         if "observation_source" in group.columns:
             unique_sources = [str(value) for value in pd.unique(group["observation_source"]) if pd.notna(value)]
             row["observation_sources"] = ",".join(unique_sources)
@@ -155,6 +157,15 @@ def _first_non_null(series: pd.Series) -> Any:
     if non_null.empty:
         return pd.NA
     return non_null.iloc[0]
+
+
+def _first_preferred_non_null(group: pd.DataFrame, column: str) -> Any:
+    if "_prefer_columns" in group.columns:
+        preferred_mask = group["_prefer_columns"].map(lambda columns: column in columns)
+        preferred = group.loc[preferred_mask, column]
+        if preferred.notna().any():
+            return _first_non_null(preferred)
+    return _first_non_null(group[column])
 
 
 def _first_non_empty_string(series: pd.Series) -> str:
