@@ -1,0 +1,296 @@
+experiment:
+  name: v3_humidity_direct_lgbm_72to24
+  version: v3
+  notes: Humidity V3 direct-RH LightGBM starter config (72->24). Predicts relative humidity directly for comparison against dew-point and dew-point-depression target tracks.
+
+paths:
+  observation_csv: data/raw/asos/asos_multistation_v2.csv
+  era5_csv: data/raw/era5/asos_multistation_v2_station.csv
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+  output_training_table: data/processed/v3_humidity_direct_lgbm_72to24/training_table.csv
+  output_data_quality: data/processed/v3_humidity_direct_lgbm_72to24/data_quality.json
+data:
+  target_name: humidity
+  timezone:
+    source: Asia/Seoul
+  observation_columns:
+    station_id: station_id
+    datetime: datetime
+    temp: temp
+    humidity: humidity
+    pressure: pressure
+    wind_speed: wind_speed
+    precipitation: precipitation
+    quality_flag: quality_flag
+  era5:
+    extraction_mode: bilinear
+  cleaning:
+    interpolate_limit_hours: 12
+  features:
+    encoder_continuous:
+    - obs_temp
+    - obs_humidity
+    - obs_dew_point_c
+    - obs_dew_point_depression
+    - target_value
+    - target_value_lag_1
+    - target_value_lag_3
+    - target_value_lag_6
+    - target_value_lag_12
+    - target_value_lag_24
+    - target_value_lag_48
+    - target_value_lag_72
+    - target_value_lag_168
+    - target_value_same_hour_prev_day
+    - target_value_diff_vs_prev_day
+    - target_value_roll_mean_3
+    - target_value_roll_std_3
+    - target_value_roll_mean_6
+    - target_value_roll_std_6
+    - target_value_roll_mean_12
+    - target_value_roll_std_12
+    - target_value_roll_mean_24
+    - target_value_roll_std_24
+    - target_value_delta_1
+    - target_value_delta_6
+    - target_value_delta_24
+    - obs_humidity_roll_mean_6
+    - obs_humidity_roll_mean_24
+    - obs_humidity_delta_1
+    - obs_humidity_delta_6
+    - obs_humidity_delta_24
+    - obs_temp_delta_1
+    - obs_temp_delta_6
+    - humidity_temp_interaction
+    - obs_pressure
+    - obs_wind_speed
+    - obs_precipitation
+    - era5_t2m
+    - era5_sp
+    - era5_dew_point_c
+    - era5_dew_point_depression
+    - era5_u10
+    - era5_v10
+    - era5_tp
+    - hour_sin
+    - hour_cos
+    - doy_sin
+    - doy_cos
+    - month_sin
+    - month_cos
+    - obs_saturation_vapor_pressure_hpa
+    - obs_vapor_pressure_hpa
+    - obs_absolute_humidity_g_m3
+    - era5_t2m_c
+    - era5_wind_speed
+    - era5_wind_dir_sin
+    - era5_wind_dir_cos
+    - precipitation_flag
+    - is_daytime
+    decoder_known:
+    - hour_sin
+    - hour_cos
+    - doy_sin
+    - doy_cos
+    - is_daytime
+    static_real:
+    - lat
+    - lon
+    - elevation
+    - coastal_distance_km
+    static_categoricals:
+    - station_id
+    - region_class
+  feature_engineering:
+    lag_features:
+      target_value:
+      - 1
+      - 3
+      - 6
+      - 12
+      - 24
+      - 48
+      - 72
+      - 168
+      obs_temp:
+      - 1
+      - 3
+      - 6
+      - 24
+      obs_humidity:
+      - 1
+      - 3
+      - 6
+      - 24
+      obs_pressure:
+      - 1
+      - 6
+      - 24
+      obs_wind_speed:
+      - 1
+      - 6
+      - 24
+      obs_dew_point_c:
+      - 1
+      - 3
+      - 6
+      - 24
+      obs_dew_point_depression:
+      - 1
+      - 3
+      - 6
+      - 24
+      era5_t2m:
+      - 1
+      - 3
+      - 6
+      - 12
+      - 24
+      era5_sp:
+      - 1
+      - 6
+      - 24
+      obs_vapor_pressure_hpa:
+      - 1
+      - 3
+      - 6
+      - 24
+      obs_absolute_humidity_g_m3:
+      - 1
+      - 3
+      - 6
+      - 24
+      era5_t2m_c:
+      - 1
+      - 3
+      - 6
+      - 24
+      era5_dew_point_c:
+      - 1
+      - 3
+      - 6
+      - 24
+    rolling_features:
+      target_value:
+      - 3
+      - 6
+      - 12
+      - 24
+      obs_humidity:
+      - 6
+      - 24
+      obs_temp:
+      - 6
+      - 24
+    delta_features:
+      target_value:
+      - 1
+      - 6
+      - 24
+      obs_humidity:
+      - 1
+      - 6
+      - 24
+      obs_temp:
+      - 1
+      - 6
+      - 24
+  window:
+    encoder_length: 72
+    prediction_length: 24
+  split:
+    train_end: 2024-12-31 23:00:00+00:00
+    val_end: 2025-01-31 23:00:00+00:00
+    test_end: 2025-02-28 23:00:00+00:00
+  scaling:
+    mode: global
+    group_column: station_id
+    columns:
+    - obs_temp
+    - obs_humidity
+    - obs_dew_point_c
+    - obs_dew_point_depression
+    - target_value
+    - target_value_lag_1
+    - target_value_lag_3
+    - target_value_lag_6
+    - target_value_lag_12
+    - target_value_lag_24
+    - target_value_lag_48
+    - target_value_lag_72
+    - target_value_lag_168
+    - target_value_same_hour_prev_day
+    - target_value_diff_vs_prev_day
+    - target_value_roll_mean_3
+    - target_value_roll_std_3
+    - target_value_roll_mean_6
+    - target_value_roll_std_6
+    - target_value_roll_mean_12
+    - target_value_roll_std_12
+    - target_value_roll_mean_24
+    - target_value_roll_std_24
+    - target_value_delta_1
+    - target_value_delta_6
+    - target_value_delta_24
+    - obs_humidity_roll_mean_6
+    - obs_humidity_roll_mean_24
+    - obs_humidity_delta_1
+    - obs_humidity_delta_6
+    - obs_humidity_delta_24
+    - obs_temp_delta_1
+    - obs_temp_delta_6
+    - humidity_temp_interaction
+    - obs_pressure
+    - obs_wind_speed
+    - obs_precipitation
+    - era5_t2m
+    - era5_sp
+    - era5_dew_point_c
+    - era5_dew_point_depression
+    - era5_u10
+    - era5_v10
+    - era5_tp
+    - month_sin
+    - month_cos
+    - lat
+    - lon
+    - elevation
+    - coastal_distance_km
+    - obs_saturation_vapor_pressure_hpa
+    - obs_vapor_pressure_hpa
+    - obs_absolute_humidity_g_m3
+    - era5_t2m_c
+    - era5_wind_speed
+  postprocess:
+    clip_prediction:
+    - 0
+    - 100
+model:
+  name: v3_humidity_direct_lgbm_72to24
+  type: lightgbm
+  params:
+    n_estimators: 3
+    learning_rate: 0.08
+    num_leaves: 7
+    subsample: 0.9
+    colsample_bytree: 0.9
+    n_jobs: 8
+training:
+  batch_size: 64
+  max_epochs: 1
+  early_stopping_patience: 1
+  num_workers: 0
+  device: cpu
+  gradient_clip_val: 0.0
+evaluation:
+  bias_correction:
+    enabled: true
+    mode: per_station_horizon
+    method: mean_bias
+    calibration_fraction: 0.7
+    apply_when: improves_on_holdout
+    selection_metric: rmse
+    min_improvement: 0.0
+artifacts:
+  root_dir: data/artifacts/v3_experiments
+  leaderboard_path: data/artifacts/v3_experiments/leaderboard.csv

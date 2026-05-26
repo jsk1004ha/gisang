@@ -281,6 +281,10 @@ def main() -> None:
     parser.add_argument("--model-config", required=True)
     parser.add_argument("--train-config", required=True)
     parser.add_argument("--resume-from", default=None)
+    parser.add_argument("--update-report", dest="update_report", action="store_true", default=True, help="Regenerate reports/experiment_report.html after training (default).")
+    parser.add_argument("--no-update-report", dest="update_report", action="store_false", help="Skip automatic unified report generation.")
+    parser.add_argument("--report-output-dir", default="reports")
+    parser.add_argument("--report-title", default="기상 V1-V3 실험 리포트")
     args = parser.parse_args()
 
     train_config = load_yaml(args.train_config)
@@ -291,6 +295,10 @@ def main() -> None:
         model_config=load_yaml(args.model_config),
         train_config=train_config,
     )
+    if args.update_report:
+        from weather_korea_forecast.reporting.generate_report import build_report
+
+        build_report(experiments_root=Path("data/artifacts"), output_dir=Path(args.report_output_dir), title=args.report_title)
     print(experiment_dir)
 
 

@@ -1,0 +1,220 @@
+experiment:
+  name: v3_temp_observed_oracle_decoder_feature_72to24
+  version: v3
+  notes: 'Diagnostic backtest-only oracle: copies future observed target_value from
+    the decoder slice. This uses actual future observations, so it is an RMSE ceiling/leakage
+    check, not an operational forecast.'
+paths:
+  observation_csv: data/raw/asos/asos_multistation_v2.csv
+  era5_csv: data/raw/era5/asos_multistation_v2_station.csv
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+  output_training_table: data/processed/v3_temp_observed_oracle_decoder_feature_72to24/training_table.csv
+  output_data_quality: data/processed/v3_temp_observed_oracle_decoder_feature_72to24/data_quality.json
+data:
+  target_name: temp
+  timezone:
+    source: Asia/Seoul
+  observation_columns:
+    station_id: station_id
+    datetime: datetime
+    temp: temp
+    humidity: humidity
+    pressure: pressure
+    wind_speed: wind_speed
+    precipitation: precipitation
+    quality_flag: quality_flag
+  era5:
+    extraction_mode: bilinear
+  cleaning:
+    interpolate_limit_hours: 12
+  features:
+    encoder_continuous:
+    - target_value
+    - target_value_lag_1
+    - target_value_lag_3
+    - target_value_lag_6
+    - target_value_lag_12
+    - target_value_lag_24
+    - target_value_lag_48
+    - target_value_lag_72
+    - target_value_same_hour_prev_day
+    - target_value_roll_mean_3
+    - target_value_roll_std_3
+    - target_value_roll_mean_6
+    - target_value_roll_std_6
+    - target_value_roll_mean_12
+    - target_value_roll_std_12
+    - target_value_roll_mean_24
+    - target_value_roll_std_24
+    - target_value_delta_1
+    - target_value_delta_6
+    - target_value_delta_24
+    - obs_minus_era5_temp_lag_1
+    - obs_minus_era5_temp_lag_6
+    - obs_minus_era5_temp_lag_24
+    - obs_minus_era5_temp_lag_48
+    - obs_minus_era5_temp_roll_mean_24
+    - obs_minus_era5_temp_roll_mean_72
+    - obs_pressure
+    - obs_wind_speed
+    - obs_precipitation
+    - era5_t2m
+    - era5_sp
+    - era5_u10
+    - era5_v10
+    - era5_tp
+    - hour_sin
+    - hour_cos
+    - doy_sin
+    - doy_cos
+    - era5_wind_speed
+    - era5_wind_dir_sin
+    - era5_wind_dir_cos
+    - obs_minus_era5_temp_roll_std_24
+    decoder_known:
+    - target_value
+    - hour_sin
+    - hour_cos
+    - doy_sin
+    - doy_cos
+    static_real:
+    - lat
+    - lon
+    - elevation
+    - coastal_distance_km
+    static_categoricals:
+    - station_id
+    - region_class
+    - terrain_class
+    - coastal_class
+  feature_engineering:
+    lag_features:
+      target_value:
+      - 1
+      - 3
+      - 6
+      - 12
+      - 24
+      - 48
+      - 72
+      - 168
+      obs_pressure:
+      - 1
+      - 6
+      - 24
+      obs_wind_speed:
+      - 1
+      - 6
+      - 24
+      era5_t2m:
+      - 1
+      - 3
+      - 6
+      - 12
+      - 24
+      era5_sp:
+      - 1
+      - 6
+      - 24
+      obs_minus_era5_temp:
+      - 1
+      - 6
+      - 24
+      - 48
+    rolling_features:
+      target_value:
+      - 3
+      - 6
+      - 12
+      - 24
+      obs_minus_era5_temp:
+      - 24
+      - 72
+    delta_features:
+      target_value:
+      - 1
+      - 6
+      - 24
+  window:
+    encoder_length: 72
+    prediction_length: 24
+  split:
+    train_end: '2024-12-31T23:00:00Z'
+    val_end: '2025-01-31T23:00:00Z'
+    test_end: '2025-02-28T23:00:00Z'
+  scaling:
+    mode: global
+    group_column: station_id
+    columns:
+    - target_value
+    - target_value_lag_1
+    - target_value_lag_3
+    - target_value_lag_6
+    - target_value_lag_12
+    - target_value_lag_24
+    - target_value_lag_48
+    - target_value_lag_72
+    - target_value_same_hour_prev_day
+    - target_value_roll_mean_3
+    - target_value_roll_std_3
+    - target_value_roll_mean_6
+    - target_value_roll_std_6
+    - target_value_roll_mean_12
+    - target_value_roll_std_12
+    - target_value_roll_mean_24
+    - target_value_roll_std_24
+    - target_value_delta_1
+    - target_value_delta_6
+    - target_value_delta_24
+    - obs_pressure
+    - obs_wind_speed
+    - obs_precipitation
+    - era5_t2m
+    - era5_sp
+    - era5_u10
+    - era5_v10
+    - era5_tp
+    - lat
+    - lon
+    - elevation
+    - coastal_distance_km
+    - era5_wind_speed
+    - era5_wind_dir_sin
+    - era5_wind_dir_cos
+    - obs_minus_era5_temp_lag_1
+    - obs_minus_era5_temp_lag_6
+    - obs_minus_era5_temp_lag_24
+    - obs_minus_era5_temp_lag_48
+    - obs_minus_era5_temp_roll_mean_24
+    - obs_minus_era5_temp_roll_mean_72
+    - obs_minus_era5_temp_roll_std_24
+  postprocess:
+    clip_prediction: null
+  future_features:
+    source: observed_target_oracle
+    operational_valid: false
+    backtest_only: true
+    track: observed_target_oracle
+    weather_columns: []
+    note: 'Diagnostic only: decoder target_value is the actual future observed temperature.
+      Do not use as an operational forecast benchmark.'
+model:
+  name: v3_temp_observed_oracle_decoder_feature_72to24
+  type: decoder_feature_baseline
+  target_source_features:
+  - target_value
+training:
+  batch_size: 64
+  max_epochs: 1
+  early_stopping_patience: 1
+  num_workers: 0
+  device: cpu
+  gradient_clip_val: 0.0
+evaluation:
+  bias_correction:
+    enabled: false
+    mode: global
+    method: mean_bias
+artifacts:
+  root_dir: data/artifacts/v3_experiments_diagnostic
+  leaderboard_path: data/artifacts/v3_experiments_diagnostic/leaderboard.csv

@@ -207,7 +207,7 @@ class TFTModelWrapper:
         self.model.eval()
         predictions: list[torch.Tensor] = []
         targets: list[torch.Tensor] = []
-        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": [], "region_class": []}
+        metadata: dict[str, list[Any]] = {"station_id": [], "prediction_start": [], "region_class": [], "target_context": []}
         with torch.no_grad():
             for batch in loader:
                 encoder = batch["encoder_cont"].to(torch_device)
@@ -219,6 +219,8 @@ class TFTModelWrapper:
                 metadata["station_id"].extend(batch["station_id"])
                 metadata["prediction_start"].extend(batch["prediction_start"])
                 metadata["region_class"].extend(batch.get("region_class", []))
+                if "target_context" in batch:
+                    metadata["target_context"].extend(batch["target_context"].cpu())
         return torch.cat(predictions), torch.cat(targets), metadata
 
     def save(self, path: str | Path, extra_state: dict[str, Any] | None = None) -> Path:

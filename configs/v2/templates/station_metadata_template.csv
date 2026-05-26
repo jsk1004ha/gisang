@@ -1,5 +1,5 @@
-station_id,lat,lon,elevation,region_class,coastal_distance_km
-108,37.57142,126.9658,85.67,capital,35.0
-159,35.10468,129.03203,69.56,coastal,2.0
-143,35.15953,126.85260,74.52,inland,47.0
-184,33.51411,126.52969,20.79,island,0.5
+station_id,station_name,lat,lon,elevation,coastal_distance_km,region_class,terrain_class,coastal_class,urban_class
+108,Seoul,37.57142,126.9658,85.67,35.0,capital,plain,inland,urban
+159,Busan,35.10468,129.03203,69.56,2.0,south_coast,coastal_lowland,south_coast,urban
+143,Gwangju,35.15953,126.85260,74.52,47.0,basin,basin,inland,urban
+184,Jeju,33.51411,126.52969,20.79,0.5,island,coastal_lowland,island,urban

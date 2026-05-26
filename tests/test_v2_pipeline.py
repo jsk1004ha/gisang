@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -7,11 +8,14 @@ import pandas as pd
 import pytest
 
 from weather_korea_forecast.utils.io import read_table
+from weather_korea_forecast.utils.config import load_yaml
 from weather_korea_forecast.v2.data import build_v2_training_table
 from weather_korea_forecast.v2.dataset import build_v2_dataset_bundle
-from weather_korea_forecast.v2.evaluate import evaluate_experiment
-from weather_korea_forecast.v2.predict import generate_v2_forecast
+from weather_korea_forecast.v2.evaluate import evaluate_experiment, evaluate_prediction_frame
+from weather_korea_forecast.v2.future_features import build_future_feature_metadata, load_future_weather_table
+from weather_korea_forecast.v2.predict import _build_forecast_decoder_frame, generate_v2_forecast
 from weather_korea_forecast.v2.train import apply_postprocessing, compute_bias_correction, train_v2_experiment
+from weather_korea_forecast.v2.target_transforms import logit_relative_humidity
 
 
 @pytest.fixture()
@@ -235,9 +239,16 @@ def test_build_v2_training_table_multistation_features(synthetic_v2_project: dic
     training_table, quality_report = build_v2_training_table(synthetic_v2_project["temp_ridge_config"])
 
     assert training_table["station_id"].nunique() == 2
-    assert {"target_value", "target_value_lag_24", "target_value_roll_mean_6", "region_class", "coastal_distance_km"}.issubset(
-        training_table.columns
-    )
+    assert {
+        "target_value",
+        "target_value_lag_24",
+        "target_value_roll_mean_6",
+        "region_class",
+        "coastal_distance_km",
+        "obs_minus_era5_temp",
+        "coastal_class",
+        "terrain_class",
+    }.issubset(training_table.columns)
     assert quality_report["station_count"] == 2
 
 
@@ -254,6 +265,72 @@ def test_v2_feature_engineering_uses_past_only_windows(synthetic_v2_project: dic
     assert station_frame.loc[row_index, "target_value_delta_6"] == pytest.approx(
         station_frame.loc[row_index, "target_value"] - station_frame.loc[row_index - 6, "target_value"]
     )
+
+
+def test_v2_era5_dew_point_kelvin_conversion_and_sanity(synthetic_v2_project: dict[str, object], tmp_path: Path) -> None:
+    config = {
+        **synthetic_v2_project["temp_ridge_config"],
+        "paths": {
+            **synthetic_v2_project["temp_ridge_config"]["paths"],
+            "output_training_table": str(tmp_path / "kelvin" / "training_table.csv"),
+            "output_data_quality": str(tmp_path / "kelvin" / "data_quality.json"),
+        },
+    }
+    era5_path = Path(config["paths"]["era5_csv"])
+    era5 = pd.read_csv(era5_path)
+    era5["era5_d2m"] = era5["era5_t2m"] - 2.0 + 273.15
+    era5["era5_t2m"] = era5["era5_t2m"] + 273.15
+    era5.to_csv(era5_path, index=False)
+
+    training_table, quality_report = build_v2_training_table(config)
+
+    assert training_table["era5_t2m"].mean() < 40.0
+    assert training_table["era5_t2m_c"].equals(training_table["era5_t2m"])
+    assert training_table["era5_dew_point_c"].mean() < 40.0
+    assert (
+        training_table["era5_dew_point_depression"]
+        - (training_table["era5_t2m_c"] - training_table["era5_dew_point_c"])
+    ).abs().max() == pytest.approx(0.0)
+    assert quality_report["era5_feature_sanity"]["era5_dew_point_c"]["mean"] < 40.0
+
+
+def test_v2_humidity_feature_sanity_reports_time_features_and_celsius_dewpoint(synthetic_v2_project: dict[str, object], tmp_path: Path) -> None:
+    base_config = synthetic_v2_project["humidity_tft_config"]
+    features = {
+        **base_config["data"]["features"],
+        "encoder_continuous": [
+            column
+            for column in base_config["data"]["features"]["encoder_continuous"]
+            if column not in {"hour_sin", "hour_cos", "doy_sin", "doy_cos"}
+        ],
+        "decoder_known": [],
+    }
+    config = {
+        **base_config,
+        "paths": {
+            **base_config["paths"],
+            "output_training_table": str(tmp_path / "humidity_sanity" / "training_table.csv"),
+            "output_data_quality": str(tmp_path / "humidity_sanity" / "data_quality.json"),
+        },
+        "data": {
+            **base_config["data"],
+            "features": features,
+        },
+    }
+    era5_path = Path(config["paths"]["era5_csv"])
+    era5 = pd.read_csv(era5_path)
+    era5["era5_d2m"] = era5["era5_t2m"] - 2.0 + 273.15
+    era5["era5_t2m"] = era5["era5_t2m"] + 273.15
+    era5.to_csv(era5_path, index=False)
+
+    training_table, quality_report = build_v2_training_table(config)
+    sanity = quality_report["humidity_feature_sanity"]
+
+    assert training_table["era5_dew_point_c"].mean() < 40.0
+    assert set(sanity["missing_configured_time_features"]) == {"hour_sin", "hour_cos", "doy_sin", "doy_cos"}
+    assert sanity["missing_frame_time_features"] == []
+    assert any("humidity time features missing from config" in warning for warning in sanity["warnings"])
+    assert not any("appears to be Kelvin" in warning for warning in sanity["warnings"])
 
 
 def test_v2_stationwise_and_regionwise_scaling_fit_train_groups_only(synthetic_v2_project: dict[str, object]) -> None:
@@ -287,6 +364,71 @@ def test_v2_stationwise_and_regionwise_scaling_fit_train_groups_only(synthetic_v
     assert set(region_bundle.scaler.group_means["target_value"]) == {"capital", "coastal"}
 
 
+def test_v2_logit_humidity_target_restores_rh_predictions(synthetic_v2_project: dict[str, object], tmp_path: Path) -> None:
+    base_config = synthetic_v2_project["temp_ridge_config"]
+    config = {
+        **base_config,
+        "experiment": {"name": "synthetic_v2_humidity_logit_ridge", "version": "v2"},
+        "paths": {
+            **base_config["paths"],
+            "output_training_table": str(tmp_path / "logit" / "training_table.csv"),
+            "output_data_quality": str(tmp_path / "logit" / "data_quality.json"),
+        },
+        "data": {
+            **base_config["data"],
+            "target_name": "humidity",
+            "target_transform": {"type": "logit_rh", "source_column": "humidity"},
+            "postprocess": {"clip_prediction": [0, 100]},
+        },
+        "model": {"name": "synthetic_v2_humidity_logit_ridge", "type": "ridge", "alpha": 1.0},
+        "artifacts": {
+            "root_dir": str(tmp_path / "artifacts" / "logit"),
+            "leaderboard_path": str(tmp_path / "artifacts" / "logit" / "leaderboard.csv"),
+        },
+    }
+    training_table, _ = build_v2_training_table(config)
+    first = training_table.iloc[0]
+    assert first["target_value"] == pytest.approx(logit_relative_humidity(np.asarray([first["humidity"]]))[0])
+
+    experiment_dir = train_v2_experiment(config)
+    predictions = read_table(Path(experiment_dir) / "predictions_test.csv")
+
+    assert predictions["target_name"].eq("humidity").all()
+    assert predictions["prediction"].between(0.0, 100.0).all()
+    assert predictions["actual"].between(0.0, 100.0).all()
+    assert "prediction_model_value" in predictions.columns
+
+
+def test_v2_humidity_extreme_sample_weighting_marks_sequences(synthetic_v2_project: dict[str, object], tmp_path: Path) -> None:
+    base_config = synthetic_v2_project["temp_ridge_config"]
+    config = {
+        **base_config,
+        "paths": {
+            **base_config["paths"],
+            "output_training_table": str(tmp_path / "weighted" / "training_table.csv"),
+            "output_data_quality": str(tmp_path / "weighted" / "data_quality.json"),
+        },
+        "data": {
+            **base_config["data"],
+            "target_name": "humidity",
+            "sample_weighting": {
+                "enabled": True,
+                "mode": "humidity_extremes",
+                "source_column": "humidity",
+                "low_threshold": 50.0,
+                "high_threshold": 70.0,
+                "extreme_weight": 3.0,
+            },
+        },
+    }
+    training_table, _ = build_v2_training_table(config)
+    bundle = build_v2_dataset_bundle(training_table, config)
+    weights = [float(sample["sample_weight"].item()) for sample in bundle.train_dataset.samples]
+
+    assert max(weights) == pytest.approx(3.0)
+    assert min(weights) == pytest.approx(1.0)
+
+
 def test_v2_ridge_roundtrip_updates_leaderboard(synthetic_v2_project: dict[str, object]) -> None:
     experiment_dir = train_v2_experiment(synthetic_v2_project["temp_ridge_config"])
     evaluation = evaluate_experiment(experiment_dir)
@@ -302,7 +444,418 @@ def test_v2_ridge_roundtrip_updates_leaderboard(synthetic_v2_project: dict[str, 
     assert "synthetic_v2_temp_ridge" in leaderboard["experiment_name"].tolist()
     assert (Path(experiment_dir) / "metrics_target_name_station_id.csv").exists()
     assert (Path(experiment_dir) / "experiment_summary.md").exists()
-    assert {"scaling_mode", "num_stations", "best_horizon", "worst_horizon", "raw_rmse", "corrected_rmse"}.issubset(leaderboard.columns)
+    assert {
+        "scaling_mode",
+        "num_stations",
+        "best_horizon",
+        "worst_horizon",
+        "raw_rmse",
+        "corrected_rmse",
+        "forecast_track",
+        "model_family",
+        "uses_future_nwp_features",
+        "future_feature_source",
+        "operational_valid",
+        "backtest_only",
+    }.issubset(leaderboard.columns)
+
+
+def test_v2_forecast_supports_region_horizon_bias_correction(synthetic_v2_project: dict[str, object]) -> None:
+    base_config = synthetic_v2_project["temp_ridge_config"]
+    config = {
+        **base_config,
+        "experiment": {"name": "synthetic_v2_temp_region_bias", "version": "v2"},
+        "evaluation": {
+            "bias_correction": {
+                **base_config["evaluation"]["bias_correction"],
+                "mode": "per_region_horizon",
+            }
+        },
+    }
+    experiment_dir = train_v2_experiment(config)
+
+    forecast = generate_v2_forecast(
+        experiment_dir=experiment_dir,
+        station_id="108",
+        forecast_init_time="2024-01-10T18:00:00Z",
+    )
+    bias_payload = json.loads((Path(experiment_dir) / "bias_correction.json").read_text(encoding="utf-8"))
+
+    assert bias_payload["mode"] == "per_region_horizon"
+    assert list(forecast.columns) == ["station_id", "timestamp", "target_name", "prediction"]
+    assert len(forecast) == config["data"]["window"]["prediction_length"]
+    assert forecast["prediction"].notna().all()
+
+
+def test_v2_forecast_decoder_uses_future_known_covariates(synthetic_v2_project: dict[str, object]) -> None:
+    base_config = synthetic_v2_project["temp_ridge_config"]
+    config = {
+        **base_config,
+        "data": {
+            **base_config["data"],
+            "features": {
+                **base_config["data"]["features"],
+                "decoder_known": [
+                    *base_config["data"]["features"]["decoder_known"],
+                    "era5_t2m",
+                ],
+            },
+            "feature_engineering": {
+                **base_config["data"]["feature_engineering"],
+                "lag_features": {
+                    **base_config["data"]["feature_engineering"]["lag_features"],
+                    "target_value": [1, 3, 6, 12, 24, 48, 72],
+                },
+            },
+            "scaling": {
+                **base_config["data"]["scaling"],
+                "columns": [
+                    *base_config["data"]["scaling"]["columns"],
+                    "target_value_lag_48",
+                    "target_value_lag_72",
+                ],
+            },
+        },
+    }
+    training_table, _ = build_v2_training_table(config)
+    bundle = build_v2_dataset_bundle(training_table, config)
+    station_frame = bundle.full_frame.loc[bundle.full_frame["station_id"].astype(str) == "108"].copy()
+    init_time = pd.Timestamp("2024-01-09T12:00:00Z")
+    encoder_frame = station_frame.loc[station_frame["datetime"] <= init_time].tail(bundle.encoder_length).copy()
+    future_timestamps = pd.date_range(
+        start=init_time + pd.Timedelta(hours=1),
+        periods=bundle.prediction_length,
+        freq="1h",
+        tz="UTC",
+    )
+
+    decoder_frame = _build_forecast_decoder_frame(station_frame, future_timestamps, bundle, encoder_frame)
+    expected = (
+        station_frame.set_index("datetime")
+        .loc[future_timestamps, "era5_t2m"]
+        .astype(float)
+        .to_numpy()
+    )
+
+    assert np.allclose(decoder_frame["era5_t2m"].astype(float).to_numpy(), expected)
+    assert not np.allclose(
+        decoder_frame["era5_t2m"].astype(float).to_numpy(),
+        np.repeat(float(encoder_frame.iloc[-1]["era5_t2m"]), len(decoder_frame)),
+    )
+
+
+def test_v2_future_weather_decoder_requires_future_valid_covariates(synthetic_v2_project: dict[str, object]) -> None:
+    base_config = synthetic_v2_project["temp_ridge_config"]
+    config = {
+        **base_config,
+        "data": {
+            **base_config["data"],
+            "future_features": {"track": "nwp_assisted", "source": "era5_reanalysis", "operational_valid": False},
+            "features": {
+                **base_config["data"]["features"],
+                "decoder_known": [
+                    *base_config["data"]["features"]["decoder_known"],
+                    "era5_t2m",
+                ],
+            },
+        },
+    }
+    training_table, _ = build_v2_training_table(config)
+    bundle = build_v2_dataset_bundle(training_table, config)
+    station_frame = bundle.full_frame.loc[bundle.full_frame["station_id"].astype(str) == "108"].copy()
+    init_time = pd.to_datetime(station_frame["datetime"], utc=True).max() - pd.Timedelta(hours=2)
+    encoder_frame = station_frame.loc[station_frame["datetime"] <= init_time].tail(bundle.encoder_length).copy()
+    future_timestamps = pd.date_range(
+        start=init_time + pd.Timedelta(hours=1),
+        periods=bundle.prediction_length,
+        freq="1h",
+        tz="UTC",
+    )
+
+    with pytest.raises(ValueError, match="requires future-valid weather covariates"):
+        _build_forecast_decoder_frame(station_frame, future_timestamps, bundle, encoder_frame)
+
+
+def test_v2_operational_decoder_uses_forecast_csv_and_history_lags(
+    synthetic_v2_project: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    base_config = synthetic_v2_project["temp_ridge_config"]
+    config = {
+        **base_config,
+        "data": {
+            **base_config["data"],
+            "future_features": {
+                "track": "nwp_assisted",
+                "source": "gfs_forecast",
+                "operational_valid": True,
+                "column_mapping": {
+                    "era5_t2m": "gfs_t2m",
+                    "era5_sp": "gfs_sp",
+                    "era5_u10": "gfs_u10",
+                    "era5_v10": "gfs_v10",
+                    "era5_tp": "gfs_tp",
+                },
+            },
+            "features": {
+                **base_config["data"]["features"],
+                "decoder_known": [
+                    *base_config["data"]["features"]["decoder_known"],
+                    "era5_t2m",
+                    "era5_sp",
+                    "era5_u10",
+                    "era5_v10",
+                    "era5_tp",
+                    "era5_wind_speed",
+                    "era5_wind_dir_sin",
+                    "era5_wind_dir_cos",
+                    "target_value_lag_24",
+                    "target_value_lag_48",
+                    "target_value_lag_72",
+                    "target_value_same_hour_prev_day",
+                ],
+            },
+            "feature_engineering": {
+                **base_config["data"]["feature_engineering"],
+                "lag_features": {
+                    **base_config["data"]["feature_engineering"]["lag_features"],
+                    "target_value": [1, 3, 6, 12, 24, 48, 72],
+                },
+            },
+            "scaling": {
+                **base_config["data"]["scaling"],
+                "columns": [
+                    *base_config["data"]["scaling"]["columns"],
+                    "target_value_lag_48",
+                    "target_value_lag_72",
+                ],
+            },
+        },
+    }
+    training_table, _ = build_v2_training_table(config)
+    bundle = build_v2_dataset_bundle(training_table, config)
+    station_frame = bundle.full_frame.loc[bundle.full_frame["station_id"].astype(str) == "108"].copy()
+    init_time = pd.Timestamp("2024-01-09T12:00:00Z")
+    encoder_frame = station_frame.loc[station_frame["datetime"] <= init_time].tail(bundle.encoder_length).copy()
+    future_timestamps = pd.date_range(
+        start=init_time + pd.Timedelta(hours=1),
+        periods=bundle.prediction_length,
+        freq="1h",
+        tz="UTC",
+    )
+    forecast_rows = []
+    for index, timestamp in enumerate(future_timestamps):
+        forecast_rows.append(
+            {
+                "station_id": "108",
+                "issue_time": str(init_time),
+                "valid_time": str(timestamp),
+                "gfs_t2m": 280.15 + index,
+                "gfs_sp": 1008.0 + index,
+                "gfs_u10": 1.0,
+                "gfs_v10": 2.0,
+                "gfs_tp": 0.1 * index,
+            }
+        )
+    forecast_path = tmp_path / "future_gfs.csv"
+    pd.DataFrame(forecast_rows).to_csv(forecast_path, index=False)
+    future_weather = load_future_weather_table(forecast_path, config, station_id="108", forecast_init_time=init_time)
+
+    decoder_frame = _build_forecast_decoder_frame(station_frame, future_timestamps, bundle, encoder_frame, future_weather)
+    expected_lag24_time = future_timestamps[0] - pd.Timedelta(hours=24)
+    expected_raw_lag24 = float(
+        station_frame.loc[station_frame["datetime"] == expected_lag24_time, "target_value_raw"].iloc[0]
+    )
+    expected_scaled_lag24 = (
+        expected_raw_lag24 - bundle.scaler.global_means["target_value_lag_24"]
+    ) / bundle.scaler.global_stds["target_value_lag_24"]
+
+    assert decoder_frame["era5_t2m"].iloc[0] == pytest.approx(7.0)
+    assert decoder_frame["era5_wind_speed"].iloc[0] == pytest.approx(np.sqrt(5.0))
+    assert decoder_frame["target_value_lag_24"].iloc[0] == pytest.approx(expected_scaled_lag24)
+    assert decoder_frame["target_value_same_hour_prev_day"].iloc[0] == pytest.approx(expected_scaled_lag24)
+
+
+def test_v2_future_era5_residual_target_restores_absolute_temperature(
+    synthetic_v2_project: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    base_config = synthetic_v2_project["temp_ridge_config"]
+    residual_features = [
+        "obs_minus_era5_temp_lag_1",
+        "obs_minus_era5_temp_lag_6",
+        "obs_minus_era5_temp_lag_24",
+        "obs_minus_era5_temp_lag_48",
+        "obs_minus_era5_temp_roll_mean_24",
+        "obs_minus_era5_temp_roll_mean_72",
+    ]
+    config = {
+        **base_config,
+        "experiment": {"name": "synthetic_v2_temp_future_era5_residual", "version": "v2"},
+        "paths": {
+            **base_config["paths"],
+            "output_training_table": str(tmp_path / "residual" / "training_table.csv"),
+            "output_data_quality": str(tmp_path / "residual" / "data_quality.json"),
+        },
+        "data": {
+            **base_config["data"],
+            "target_transform": {"type": "residual_from_feature", "baseline_column": "era5_t2m_c"},
+            "future_features": {
+                "track": "nwp_assisted",
+                "source": "era5_reanalysis",
+                "operational_valid": False,
+            },
+            "features": {
+                **base_config["data"]["features"],
+                "encoder_continuous": [
+                    *base_config["data"]["features"]["encoder_continuous"],
+                    *residual_features,
+                ],
+                "decoder_known": [
+                    *base_config["data"]["features"]["decoder_known"],
+                    "era5_t2m",
+                ],
+            },
+            "feature_engineering": {
+                **base_config["data"]["feature_engineering"],
+                "lag_features": {
+                    **base_config["data"]["feature_engineering"]["lag_features"],
+                    "obs_minus_era5_temp": [1, 6, 24, 48],
+                },
+                "rolling_features": {
+                    **base_config["data"]["feature_engineering"]["rolling_features"],
+                    "obs_minus_era5_temp": [24, 72],
+                },
+            },
+            "scaling": {
+                **base_config["data"]["scaling"],
+                "columns": [
+                    *base_config["data"]["scaling"]["columns"],
+                    *residual_features,
+                ],
+            },
+        },
+        "artifacts": {
+            "root_dir": str(tmp_path / "artifacts" / "residual"),
+            "leaderboard_path": str(tmp_path / "artifacts" / "residual" / "leaderboard.csv"),
+        },
+    }
+    training_table, _ = build_v2_training_table(config)
+    row = training_table.iloc[24]
+    station_frame = training_table.loc[training_table["station_id"].astype(str) == str(row["station_id"])].sort_values("datetime").reset_index(drop=True)
+
+    assert row["target_value"] == pytest.approx(row["temp"] - row["era5_t2m_c"])
+    assert "obs_minus_era5_temp_lag_24" in training_table.columns
+    assert station_frame.loc[48, "obs_minus_era5_temp_lag_24"] == pytest.approx(station_frame.loc[24, "obs_minus_era5_temp"])
+
+    experiment_dir = train_v2_experiment(config)
+    predictions = read_table(Path(experiment_dir) / "predictions_test.csv")
+    metadata = json.loads((Path(experiment_dir) / "future_feature_metadata.json").read_text(encoding="utf-8"))
+    leaderboard = read_table(Path(config["artifacts"]["leaderboard_path"]))
+
+    assert predictions["actual"].between(training_table["temp"].min() - 1.0, training_table["temp"].max() + 1.0).all()
+    assert not predictions["actual"].round(6).equals(predictions["actual_model_value"].round(6))
+    assert metadata["uses_future_nwp_features"] is True
+    assert metadata["future_feature_source"] == "era5_reanalysis"
+    assert metadata["operational_valid"] is False
+    assert metadata["backtest_only"] is True
+    assert leaderboard.loc[0, "forecast_track"] == "nwp_assisted"
+    assert leaderboard.loc[0, "model_family"] == "ridge"
+    assert bool(leaderboard.loc[0, "backtest_only"]) is True
+    assert (Path(config["artifacts"]["leaderboard_path"]).with_name("leaderboard_nwp_assisted.csv")).exists()
+
+
+def test_v3_temp_mos_residual_config_declares_backtest_track() -> None:
+    config = load_yaml("configs/v3/experiments/v3_temp_mos_residual_ridge_72to24.yaml")
+    metadata = build_future_feature_metadata(config)
+
+    assert config["experiment"]["version"] == "v3"
+    assert config["model"]["name"] == "v3_temp_mos_residual_ridge_72to24"
+    assert config["data"]["target_transform"] == {"type": "residual_from_feature", "baseline_column": "era5_t2m_c"}
+    assert "obs_minus_era5_temp_roll_std_24" in config["data"]["features"]["encoder_continuous"]
+    assert metadata["forecast_track"] == "nwp_assisted_mos"
+    assert metadata["future_feature_source"] == "era5_reanalysis"
+    assert metadata["operational_valid"] is False
+    assert metadata["backtest_only"] is True
+
+
+def test_v3_temp_observed_oracle_config_is_marked_diagnostic_only() -> None:
+    config = load_yaml("configs/v3/experiments/diagnostic/v3_temp_observed_oracle_decoder_feature_72to24.yaml")
+    metadata = build_future_feature_metadata(config)
+
+    assert config["experiment"]["version"] == "v3"
+    assert config["model"]["type"] == "decoder_feature_baseline"
+    assert config["model"]["target_source_features"] == ["target_value"]
+    assert config["data"]["features"]["decoder_known"][0] == "target_value"
+    assert metadata["forecast_track"] == "observed_target_oracle"
+    assert metadata["future_feature_source"] == "observed_target_oracle"
+    assert metadata["operational_valid"] is False
+    assert metadata["backtest_only"] is True
+    assert any("oracle" in warning or "non-operational" in warning for warning in metadata["warnings"])
+
+
+def test_v3_humidity_observed_oracle_config_is_marked_diagnostic_only() -> None:
+    config = load_yaml("configs/v3/experiments/diagnostic/v3_humidity_observed_oracle_decoder_feature_72to24.yaml")
+    metadata = build_future_feature_metadata(config)
+
+    assert config["experiment"]["version"] == "v3"
+    assert config["data"]["target_name"] == "humidity"
+    assert config["model"]["type"] == "decoder_feature_baseline"
+    assert config["model"]["target_source_features"] == ["target_value"]
+    assert config["data"]["features"]["decoder_known"][0] == "target_value"
+    assert config["data"]["postprocess"]["clip_prediction"] == [0, 100]
+    assert metadata["forecast_track"] == "observed_target_oracle"
+    assert metadata["future_feature_source"] == "observed_target_oracle"
+    assert metadata["operational_valid"] is False
+    assert metadata["backtest_only"] is True
+    assert any("oracle" in warning or "non-operational" in warning for warning in metadata["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("config_path", "experiment_name", "target_transform"),
+    [
+        (
+            "configs/v3/experiments/v3_humidity_direct_lgbm_72to24.yaml",
+            "v3_humidity_direct_lgbm_72to24",
+            None,
+        ),
+        (
+            "configs/v3/experiments/v3_humidity_dewpoint_lgbm_72to24.yaml",
+            "v3_humidity_dewpoint_lgbm_72to24",
+            {
+                "type": "dew_point",
+                "source_column": "obs_dew_point_c",
+                "temperature_column": "obs_temp",
+            },
+        ),
+        (
+            "configs/v3/experiments/v3_humidity_dewpoint_depression_lgbm_72to24.yaml",
+            "v3_humidity_dewpoint_depression_lgbm_72to24",
+            {
+                "type": "dew_point_depression",
+                "source_column": "obs_dew_point_depression",
+                "temperature_column": "obs_temp",
+            },
+        ),
+    ],
+)
+def test_v3_humidity_physical_target_configs_restore_rh(
+    config_path: str, experiment_name: str, target_transform: dict[str, str] | None
+) -> None:
+    config = load_yaml(config_path)
+    metadata = build_future_feature_metadata(config)
+
+    assert config["experiment"]["version"] == "v3"
+    assert config["experiment"]["name"] == experiment_name
+    assert config["model"]["name"] == experiment_name
+    assert config["data"]["target_name"] == "humidity"
+    assert config["data"].get("target_transform") == target_transform
+    assert config["data"]["postprocess"]["clip_prediction"] == [0, 100]
+    assert config["artifacts"]["root_dir"] == "data/artifacts/v3_experiments"
+    assert metadata["forecast_track"] == "observation_only"
+    assert metadata["uses_future_weather_features"] is False
+    assert metadata["operational_valid"] is False
+    assert metadata["backtest_only"] is False
 
 
 def test_v2_horizonwise_ridge_writes_horizon_metrics_and_plots(synthetic_v2_project: dict[str, object]) -> None:
@@ -325,8 +878,70 @@ def test_v2_horizonwise_ridge_writes_horizon_metrics_and_plots(synthetic_v2_proj
     assert (Path(experiment_dir) / "horizon_station_heatmap.png").exists()
     assert (Path(experiment_dir) / "station_rmse_bar.png").exists()
     assert (Path(experiment_dir) / "region_rmse_bar.png").exists()
-    assert (Path(experiment_dir) / "metrics_daily_temperature.csv").exists()
+    assert (Path(experiment_dir) / "metrics_daily_target.csv").exists()
     assert (Path(experiment_dir) / "worst_case_summary.json").exists()
+
+
+def test_v2_evaluation_uses_target_named_daily_reports_and_humidity_metrics(tmp_path: Path) -> None:
+    predictions = pd.DataFrame(
+        [
+            {
+                "station_id": "108",
+                "prediction_start": "2024-01-01T00:00:00Z",
+                "valid_time": "2024-01-01T01:00:00Z",
+                "horizon_step": 1,
+                "target_name": "humidity",
+                "prediction": 45.0,
+                "actual": 35.0,
+                "region": "capital",
+                "season": "winter",
+            },
+            {
+                "station_id": "108",
+                "prediction_start": "2024-01-01T00:00:00Z",
+                "valid_time": "2024-01-01T02:00:00Z",
+                "horizon_step": 2,
+                "target_name": "humidity",
+                "prediction": 75.0,
+                "actual": 85.0,
+                "region": "capital",
+                "season": "winter",
+            },
+            {
+                "station_id": "159",
+                "prediction_start": "2024-01-02T00:00:00Z",
+                "valid_time": "2024-01-02T01:00:00Z",
+                "horizon_step": 1,
+                "target_name": "humidity",
+                "prediction": 38.0,
+                "actual": 37.0,
+                "region": "coastal",
+                "season": "winter",
+            },
+            {
+                "station_id": "159",
+                "prediction_start": "2024-01-02T00:00:00Z",
+                "valid_time": "2024-01-02T02:00:00Z",
+                "horizon_step": 2,
+                "target_name": "humidity",
+                "prediction": 88.0,
+                "actual": 86.0,
+                "region": "coastal",
+                "season": "winter",
+            },
+        ]
+    )
+
+    evaluate_prediction_frame(predictions, tmp_path)
+    daily_metrics = read_table(tmp_path / "metrics_daily_target.csv")
+    humidity_metrics = read_table(tmp_path / "metrics_humidity_extremes.csv")
+
+    assert (tmp_path / "daily_target_errors.csv").exists()
+    assert (tmp_path / "extreme_target_scatter.png").exists()
+    assert not (tmp_path / "daily_temperature_errors.csv").exists()
+    assert set(daily_metrics["metric"]) == {"daily_max_rh_error", "daily_min_rh_error", "daily_rh_range_error"}
+    assert humidity_metrics.loc[0, "dry_event_hit_rate"] == pytest.approx(0.5)
+    assert humidity_metrics.loc[0, "humid_event_hit_rate"] == pytest.approx(0.5)
 
 
 def test_v2_residual_framework_saves_component_predictions(synthetic_v2_project: dict[str, object]) -> None:
@@ -558,3 +1173,79 @@ def test_auto_calibration_selects_best_holdout_candidate() -> None:
     assert payload["method"] == "mean_bias"
     assert payload["selection"]["selected_mode"] == "per_station_horizon"
     assert corrected["prediction"].round(6).tolist() == corrected["actual"].round(6).tolist()
+
+
+def test_v3_generic_nwp_bias_features_are_past_only(synthetic_v2_project: dict[str, object], tmp_path: Path) -> None:
+    base_config = synthetic_v2_project["temp_ridge_config"]
+    config = {
+        **base_config,
+        "paths": {
+            **base_config["paths"],
+            "output_training_table": str(tmp_path / "nwp_bias" / "training_table.csv"),
+            "output_data_quality": str(tmp_path / "nwp_bias" / "data_quality.json"),
+        },
+        "data": {
+            **base_config["data"],
+            "features": {
+                **base_config["data"]["features"],
+                "encoder_continuous": [
+                    *base_config["data"]["features"]["encoder_continuous"],
+                    "nwp_temp_c",
+                    "obs_minus_nwp_temp_lag_24",
+                    "obs_minus_nwp_temp_roll_mean_24",
+                    "obs_minus_nwp_temp_delta_24",
+                ],
+            },
+        },
+    }
+    training_table, _ = build_v2_training_table(config)
+    station_frame = training_table.loc[training_table["station_id"].astype(str) == "108"].sort_values("datetime").reset_index(drop=True)
+
+    assert "nwp_temp_c" in training_table.columns
+    assert "obs_minus_nwp_temp" in training_table.columns
+    assert station_frame.loc[48, "obs_minus_nwp_temp_lag_24"] == pytest.approx(station_frame.loc[24, "obs_minus_nwp_temp"])
+    expected_roll = station_frame.loc[24:47, "obs_minus_nwp_temp"].mean()
+    assert station_frame.loc[48, "obs_minus_nwp_temp_roll_mean_24"] == pytest.approx(expected_roll)
+    assert station_frame.loc[48, "obs_minus_nwp_temp_delta_24"] == pytest.approx(
+        station_frame.loc[48, "obs_minus_nwp_temp"] - station_frame.loc[24, "obs_minus_nwp_temp"]
+    )
+
+
+def test_v3_configs_declare_required_mos_tracks_and_alpha_grid() -> None:
+    expected_configs = [
+        "v3_temp_mos_residual_ridge_72to24",
+        "v3_temp_mos_residual_ridge_168to24",
+        "v3_temp_mos_horizonwise_residual_ridge_72to24",
+        "v3_temp_mos_horizonwise_residual_ridge_168to24",
+        "v3_temp_mos_residual_lgbm_72to24",
+        "v3_temp_mos_residual_lgbm_168to24",
+        "v3_temp_mos_residual_catboost_72to24",
+    ]
+    for name in expected_configs:
+        config = load_yaml(f"configs/v3/experiments/{name}.yaml")
+        metadata = build_future_feature_metadata(config)
+        assert config["experiment"]["name"] == name
+        assert config["data"]["target_transform"]["type"] == "residual_from_feature"
+        assert metadata["track"] == "nwp_assisted_mos"
+        assert metadata["backtest_only"] is True
+        assert "obs_minus_nwp_temp_lag_72" in config["data"]["features"]["encoder_continuous"]
+        if config["model"]["type"] in {"ridge", "horizon_wise_ridge"}:
+            assert len(config["model"]["alpha_grid"]) == 33
+            assert config["model"]["alpha_grid"][0] == pytest.approx(1e-4)
+            assert config["model"]["alpha_grid"][-1] == pytest.approx(1e4)
+
+
+def test_v3_operational_mode_rejects_backtest_only_future_features() -> None:
+    from weather_korea_forecast.v2.predict import _validate_future_feature_inference_mode
+
+    class DummyBundle:
+        metadata = {
+            "future_features": {
+                "uses_future_weather_features": True,
+                "future_feature_source": "era5_reanalysis",
+                "backtest_only": True,
+            }
+        }
+
+    with pytest.raises(ValueError, match="backtest-only"):
+        _validate_future_feature_inference_mode(DummyBundle(), operational_mode=True)

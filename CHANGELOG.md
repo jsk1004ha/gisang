@@ -1,5 +1,51 @@
 # Changelog
 
+## 2026-05-14
+
+### Added
+- Added diagnostic-aware unified reporting: oracle/decoder-feature sanity checks are separated from main KPI/best rankings, `best`/`latest` aliases are excluded from representative leaderboards, `included_in_main_leaderboard` records the exact main-row decision, target/track-specific best cards replace mixed-unit overall best RMSE, and HTML image embedding now supports `full`, `thumbnail`, and `external-assets` modes.
+- Added humidity feature sanity reporting for dew-point Celsius ranges and required `hour_sin/hour_cos/doy_sin/doy_cos` covariates.
+- Added an issue-time-aligned V3 humidity NWP-MOS runner (`weather_korea_forecast.v3.nwp_mos`) plus `configs/v3/experiments/v3_humidity_nwp_mos_lgbm_72to24.yaml` for honest residual learning from forecast RH/dew-point archives.
+- Added `weather_korea_forecast.data.gfs_surface_forecast`, an optional NOAA GFS surface forecast extractor for station-nearest RH/T/DPT/etc. covariates, and the `nwp` optional dependency extra for `cfgrib`/`eccodes`.
+- Added V3 diagnostic temperature and humidity oracle configs under `configs/v3/experiments/diagnostic/` for observed-target RMSE ceiling checks; they are marked backtest-only and non-operational.
+- Added V2 `decoder_feature_baseline`, a config-driven baseline that copies configured future-known decoder covariates into the target for forecast-model baselines or explicit oracle/backtest ceiling checks.
+- Added a local Seoul humidity backtest-only oracle config under `configs/v2/experiments/real/`; it is documented as non-canonical and `operational_valid: false` because the local raw ERA5 file lacks dew point and the derived decoder dew point is target-derived.
+- Added the first V3 config, `configs/v3/experiments/v3_temp_mos_residual_ridge_72to24.yaml`, for temperature NWP-assisted MOS residual ridge experiments on the existing V2 CLI path.
+- Added V3 humidity starter configs for direct-RH, dew-point, and dew-point-depression LightGBM tracks, writing to the V3 artifact root while reusing RH restoration where applicable.
+- Added `docs/V3_V4_plan.md` to separate V3 station-level MOS work from V4 national/spatial/probabilistic forecasting work.
+- Added V3 leaderboard metadata fields `model_family` and `backtest_only`, plus stable umbrella track leaderboards for observation-only and NWP-assisted experiments.
+- Added `weather_korea_forecast.v2.ensemble`, an artifact-level prediction ensemble CLI that aligns component prediction files, writes evaluated ensemble artifacts, and updates V3 leaderboards.
+- Added `weather_korea_forecast.dashboard.app`, a dependency-free local web dashboard for artifact/leaderboard prediction status.
+
+## 2026-05-12
+
+### Added
+- Added V2 NWP-assisted/MOS metadata with `future_feature_metadata.json`, per-track leaderboards, and leaderboard columns for `uses_future_nwp_features`, `future_feature_source`, and `operational_valid`.
+- Added `residual_from_feature` target transform for temperature MOS runs, enabling `observed_temp - future_era5_t2m_c` training with absolute-temperature restoration at evaluation and inference time.
+- Added station-level ERA5 temperature-bias feature support (`obs_minus_era5_temp`) and residual ridge configs for `v2_temp_future_era5_residual_ridge_72to24` and `168to24`.
+- Added fallback region/coastal/terrain metadata enrichment so missing `region_class` values do not collapse all stations into `unknown`.
+- Added operational NWP-assisted inference support via `--future-weather-csv`, including issue-time selection, common GFS/NWP column aliases, wind derived features, and live reconstruction of decoder target lags from history.
+- Added a forecast weather CSV template under `configs/v2/templates/`.
+
+### Changed
+- Future-feature metadata now honors an explicit `data.future_features.backtest_only` override so non-weather oracle diagnostics are not mislabeled as operational.
+- V2 inference now refuses NWP-assisted decoder weather runs when future-valid weather covariates are missing for requested horizons instead of silently carrying forward the last encoder value.
+- Temperature daily max/min/diurnal-range metrics are flattened into summary/leaderboard fields, including the weighted `daily_score`.
+- Ridge closed-form solving now falls back to a jittered least-squares solve if a horizon-wise design matrix is singular.
+
+## 2026-05-11
+
+### Added
+- Added humidity LightGBM research configs for fixed humidity features, 168->24 encoders, horizon-wise LightGBM, logit-RH, dew-point, dew-point-depression, extreme-weighted, and quantile-calibrated experiments.
+- Added V2 humidity diagnostics: dry/humid event hit rates, low/high RH MAE, and target-neutral daily min/max/range reports.
+- Added target-transform helpers for `logit_rh`, `dew_point`, and `dew_point_depression`, including RH restoration from temperature context.
+- Added ERA5 dew-point unit sanity summaries and Kelvin-to-Celsius normalization for ERA5 temperature/dew-point inputs.
+
+### Changed
+- V2 daily and extreme plots/reports now use target-neutral names (`daily_target_errors.csv`, `metrics_daily_target.csv`, `extreme_target_scatter.png`) so humidity runs are not mislabeled as temperature reports.
+- Humidity feature engineering can now include `is_daytime`, vapor-pressure/absolute-humidity features, ERA5 wind-speed/direction features, and optional predicted-temperature merge features.
+- LightGBM baselines consume optional sequence sample weights for dry/humid extreme emphasis.
+
 ## 2026-05-10
 
 ### Added
@@ -53,3 +99,36 @@
 ### Known Limitations
 - The canonical multi-station V2 benchmark still depends on user-provided local ASOS/ERA5/metadata files.
 - True-TFT-specific residual variants and true rolling-origin retraining remain follow-up items.
+
+## 2026-05-25
+
+### Added
+- Added the V3 temperature MOS residual experiment matrix for 72h/168h ridge, horizon-wise ridge, LightGBM, horizon-wise LightGBM, optional CatBoost, and artifact-level ensemble specs.
+- Added generic `nwp_temp_c` / `obs_minus_nwp_temp_*` MOS bias features with past-only lag/rolling construction for ERA5 backtests and future forecast-NWP adapters.
+- Added V3 future-weather adapter entry point `load_future_weather_features(...)` with source options for ERA5 backtest, GFS, ECMWF, and KMA prepared forecast tables.
+- Added residual MOS component columns to `predictions_test.csv` and additional V3 plots for residual, baseline-vs-final, worst-station, worst-horizon, and diurnal-range diagnostics.
+- Added optional CatBoost baseline model routing for V3 MOS configs.
+
+### Changed
+- V3/V2 experiment summaries and leaderboards now include `track`, `uses_future_weather_features`, `leakage_risk_note`, and `worst_station_rmse` alongside existing operational-validity fields.
+- Operational inference can now fail fast with `--operational` when a saved experiment depends on backtest-only ERA5/reanalysis future covariates.
+- Station metadata loading now fills the V3 metadata schema (`station_name`, `region_class`, `terrain_class`, `coastal_class`, `urban_class`) to avoid collapsed `unknown` region reports for supported stations.
+
+## 2026-05-25
+
+### Added
+- Added the unified reporting package `weather_korea_forecast.reporting` with CSV/JSON collection, standalone HTML dashboard generation, base64 plot embedding, best-model extraction, and failed/incomplete experiment reporting.
+- Added default unified report refresh after V1/V2 train/evaluate runs so `reports/experiment_report.html` and `reports/experiment_summary.csv` are regenerated automatically; use `--no-update-report` only to skip it.
+- Added V3 core runner scripts for temperature MOS, humidity experiments, and all-core sequential execution with per-run logs under `logs/v3_runs/`.
+- Added LightGBM validation-only grid-search support with `lgbm_grid_search_results.csv` and `best_lgbm_params.json` artifacts.
+- Added prepared forecast CSV validation/conversion support for operational future-weather features, including horizon/station completeness checks and Kelvin/Pa normalization.
+- Added V3 real-run status and result-tracking docs plus reporting documentation.
+
+### Changed
+- V3/V2 leaderboard and experiment summary rows now include RMSE goal fields (`rmse_goal`, `rmse_goal_met`, `rmse_gap_to_goal`) and worst-horizon/station goal flags where available.
+- Cached V2/V3 training tables are now rebuilt automatically when configured feature columns are missing, avoiding stale pre-V3 tables during real-data runs.
+- Artifact-level ensembles can be invoked from an ensemble-only config through the V2 train CLI and can learn validation inverse-RMSE or horizon-wise weights when validation predictions are available.
+
+### Verified
+- `PYTHONPATH=src .venv312/Scripts/python.exe -m compileall -q src tests`
+- `PYTHONPATH=src .venv312/Scripts/python.exe -m pytest -q` after the reporting/V3 guard additions.

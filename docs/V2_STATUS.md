@@ -57,15 +57,19 @@ V2 now writes the original metric breakdowns plus:
 - `horizon_model_metrics.csv`
 - `predictions_test_components.csv` for residual experiments
 - `worst_case_summary.json`
-- `daily_temperature_errors.csv`
-- `metrics_daily_temperature.csv`
+- `future_feature_metadata.json`
+- `daily_target_errors.csv`
+- `metrics_daily_target.csv`
+- `metrics_humidity_extremes.csv` for humidity dry/humid event diagnostics
 - `horizon_station_heatmap.png`
 - `station_rmse_bar.png`
 - `region_rmse_bar.png`
 - `daily_max_min_error.png`
-- `extreme_temperature_scatter.png`
+- `extreme_target_scatter.png`
 
-The leaderboard includes scaling mode, number of stations, train/val/test periods, raw/corrected metrics, and best/worst horizons.
+The leaderboard includes scaling mode, forecast track, future-feature source/operational-validity flags, number of stations, train/val/test periods, raw/corrected metrics, daily max/min/range metrics, and best/worst horizons. It also emits per-target and per-track leaderboard files.
+
+Operational NWP-assisted inference now accepts `--future-weather-csv`. The CSV supplies future-valid NWP covariates; optional `issue_time` selects the latest forecast run at or before `forecast_init_time`. Decoder target lag features are rebuilt from historical rows, so live forecasts do not need future observation rows.
 
 ## Recommended next experiment order
 
@@ -75,6 +79,7 @@ The leaderboard includes scaling mode, number of stations, train/val/test period
 4. Compare global vs station-wise vs region-wise scaling on the 168->24 ridge track.
 5. Run `v2_temp_horizonwise_lgbm_168to24` if LightGBM is installed.
 6. Run `v2_temp_residual_lgbm_on_ridge_168to24` to test nonlinear residual gains.
+7. For NWP-assisted/MOS temperature, run `v2_temp_future_era5_residual_ridge_72to24` first, then `v2_temp_future_era5_residual_ridge_168to24`; treat ERA5 reanalysis decoder features as backtest-only until forecast NWP inputs are wired in.
 7. Use horizon/station/region/daily max-min artifacts to decide whether to add residual TFT or an ensemble next.
 
 ## Known limitations

@@ -1,0 +1,13 @@
+experiment:
+  name: v3_temp_mos_ensemble_72to24
+  version: v3
+  notes: Artifact-level MOS ensemble over aligned V3 residual model predictions.
+ensemble:
+  method: mean
+  components:
+  - <v3_temp_mos_residual_ridge_72to24 experiment_dir>
+  - <v3_temp_mos_residual_lgbm_72to24 experiment_dir>
+  forecast_track: nwp_assisted_mos
+artifacts:
+  root_dir: data/artifacts/v3_experiments
+  leaderboard_path: data/artifacts/v3_experiments/leaderboard.csv

@@ -22,9 +22,15 @@ def evaluate_prediction_frame(predictions: pd.DataFrame, experiment_dir: str | P
     raw_metrics = None
     if "prediction_raw" in predictions.columns:
         raw_metrics = compute_prediction_metrics(predictions.rename(columns={"prediction_raw": "_prediction_raw"}), predicted_column="_prediction_raw")
-    metrics_payload = {"metrics": metrics, "raw_metrics": raw_metrics}
+    humidity_metrics = compute_humidity_specific_metrics(predictions)
+    daily_reports = build_daily_target_reports(predictions)
+    metrics.update(flatten_daily_target_metrics(daily_reports, target_name=_target_label_for_frame(predictions)))
+    _append_temperature_daily_score(metrics, target_name=_target_label_for_frame(predictions))
+    metrics_payload = {"metrics": metrics, "raw_metrics": raw_metrics, "humidity_metrics": humidity_metrics}
     write_json(metrics_payload, experiment_path / "metrics_test.json")
     write_json(metrics, experiment_path / "metrics_summary.json")
+    if humidity_metrics:
+        write_table(pd.DataFrame([humidity_metrics]), experiment_path / "metrics_humidity_extremes.csv")
 
     for name, report in build_v2_breakdown_reports(predictions).items():
         write_table(report, experiment_path / f"metrics_{name}.csv")
@@ -34,7 +40,6 @@ def evaluate_prediction_frame(predictions: pd.DataFrame, experiment_dir: str | P
     worst_cases = predictions.assign(abs_error=lambda df: (df["prediction"] - df["actual"]).abs()).sort_values("abs_error", ascending=False).head(100)
     write_table(worst_cases, experiment_path / "worst_case_samples.csv")
     write_json(build_worst_case_summary(predictions), experiment_path / "worst_case_summary.json")
-    daily_reports = build_daily_temperature_reports(predictions)
     for name, report in daily_reports.items():
         write_table(report, experiment_path / f"{name}.csv")
     plot_forecast_vs_actual(predictions, experiment_path / "forecast_vs_actual.png")
@@ -44,8 +49,13 @@ def evaluate_prediction_frame(predictions: pd.DataFrame, experiment_dir: str | P
     plot_horizon_station_heatmap(predictions, experiment_path / "horizon_station_heatmap.png")
     plot_group_rmse_bar(predictions, "station_id", experiment_path / "station_rmse_bar.png", title="Station RMSE")
     plot_group_rmse_bar(predictions, "region", experiment_path / "region_rmse_bar.png", title="Region RMSE")
-    plot_daily_max_min_error(daily_reports.get("daily_temperature_errors", pd.DataFrame()), experiment_path / "daily_max_min_error.png")
-    plot_extreme_temperature_scatter(predictions, experiment_path / "extreme_temperature_scatter.png")
+    plot_daily_max_min_error(daily_reports.get("daily_target_errors", pd.DataFrame()), experiment_path / "daily_max_min_error.png")
+    plot_daily_diurnal_range_error(daily_reports.get("daily_target_errors", pd.DataFrame()), experiment_path / "daily_diurnal_range_error.png")
+    plot_extreme_target_scatter(predictions, experiment_path / "extreme_target_scatter.png")
+    plot_worst_station_timeseries(predictions, experiment_path / "worst_station_timeseries.png")
+    plot_worst_horizon_samples(predictions, experiment_path / "worst_horizon_samples.png")
+    plot_residual_scatter(predictions, experiment_path / "residual_scatter.png")
+    plot_baseline_vs_final_scatter(predictions, experiment_path / "baseline_vs_final_scatter.png")
     rolling_origin = build_rolling_origin_reports(predictions)
     for name, report in rolling_origin.items():
         write_table(report, experiment_path / f"metrics_{name}.csv")
@@ -84,7 +94,7 @@ def build_v2_breakdown_reports(predictions: pd.DataFrame) -> dict[str, pd.DataFr
     return reports
 
 
-def build_daily_temperature_reports(predictions: pd.DataFrame) -> dict[str, pd.DataFrame]:
+def build_daily_target_reports(predictions: pd.DataFrame) -> dict[str, pd.DataFrame]:
     if predictions.empty or "valid_time" not in predictions.columns:
         return {}
     frame = predictions.copy()
@@ -120,10 +130,12 @@ def build_daily_temperature_reports(predictions: pd.DataFrame) -> dict[str, pd.D
     if errors.empty:
         return {}
     metric_rows = []
+    target_label = _target_label_for_frame(frame)
+    metric_prefix = "rh" if target_label == "humidity" else "temp" if target_label == "temp" else "target"
     for metric_name, error_column in (
-        ("daily_max_temp", "max_error"),
-        ("daily_min_temp", "min_error"),
-        ("diurnal_range", "diurnal_range_error"),
+        (f"daily_max_{metric_prefix}_error", "max_error"),
+        (f"daily_min_{metric_prefix}_error", "min_error"),
+        ("diurnal_range_error" if metric_prefix == "temp" else f"daily_{metric_prefix}_range_error", "diurnal_range_error"),
     ):
         values = errors[error_column].astype(float).to_numpy()
         metric_rows.append(
@@ -136,9 +148,111 @@ def build_daily_temperature_reports(predictions: pd.DataFrame) -> dict[str, pd.D
             }
         )
     return {
-        "daily_temperature_errors": errors,
-        "metrics_daily_temperature": pd.DataFrame(metric_rows),
+        "daily_target_errors": errors,
+        "metrics_daily_target": pd.DataFrame(metric_rows),
     }
+
+
+def flatten_daily_target_metrics(daily_reports: dict[str, pd.DataFrame], target_name: str = "target") -> dict[str, float]:
+    metrics_frame = daily_reports.get("metrics_daily_target", pd.DataFrame())
+    if metrics_frame.empty:
+        return {}
+    by_metric = metrics_frame.set_index("metric")
+    flattened: dict[str, float] = {}
+    if target_name == "temp":
+        mapping = {
+            "daily_max_temp_error": "daily_max_temp",
+            "daily_min_temp_error": "daily_min_temp",
+            "diurnal_range_error": "diurnal_range",
+        }
+    elif target_name == "humidity":
+        mapping = {
+            "daily_max_rh_error": "daily_max_rh",
+            "daily_min_rh_error": "daily_min_rh",
+            "daily_rh_range_error": "daily_rh_range",
+        }
+    else:
+        mapping = {
+            "daily_max_target_error": "daily_max_target",
+            "daily_min_target_error": "daily_min_target",
+            "daily_target_range_error": "daily_target_range",
+        }
+    for metric_name, output_prefix in mapping.items():
+        if metric_name not in by_metric.index:
+            continue
+        row = by_metric.loc[metric_name]
+        flattened[f"{output_prefix}_rmse"] = float(row["rmse"])
+        flattened[f"{output_prefix}_mae"] = float(row["mae"])
+        flattened[f"{output_prefix}_bias"] = float(row["bias"])
+    return _with_temperature_daily_aliases(flattened, target_name)
+
+
+def _append_temperature_daily_score(metrics: dict[str, float], target_name: str) -> None:
+    if target_name != "temp":
+        return
+    required = ("rmse", "daily_max_temp_mae", "daily_min_temp_mae", "diurnal_range_mae")
+    if not all(key in metrics for key in required):
+        return
+    metrics["daily_score"] = float(
+        metrics["rmse"]
+        + 0.3 * metrics["daily_max_temp_mae"]
+        + 0.3 * metrics["daily_min_temp_mae"]
+        + 0.2 * metrics["diurnal_range_mae"]
+    )
+
+
+def _with_temperature_daily_aliases(metrics: dict[str, float], target_name: str) -> dict[str, float]:
+    if target_name != "temp":
+        return metrics
+    aliases = {
+        "daily_max_temp_mae": metrics.get("daily_max_temp_mae"),
+        "daily_min_temp_mae": metrics.get("daily_min_temp_mae"),
+        "diurnal_range_mae": metrics.get("diurnal_range_mae"),
+        "diurnal_range_bias": metrics.get("diurnal_range_bias"),
+    }
+    # The canonical keys are already generated by the temp mapping above; keep
+    # this function explicit so future renames preserve the public metric names.
+    for key, value in aliases.items():
+        if value is not None:
+            metrics[key] = value
+    return metrics
+
+
+def build_daily_temperature_reports(predictions: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Backward-compatible alias for older callers.
+
+    New V2 artifacts use target-neutral names because humidity experiments should
+    not produce temperature-labeled reports.
+    """
+    return build_daily_target_reports(predictions)
+
+
+def compute_humidity_specific_metrics(predictions: pd.DataFrame) -> dict[str, object]:
+    if predictions.empty or "target_name" not in predictions.columns:
+        return {}
+    humidity_frame = predictions.loc[predictions["target_name"].astype(str) == "humidity"].copy()
+    if humidity_frame.empty:
+        return {}
+    actual = humidity_frame["actual"].astype(float)
+    prediction = humidity_frame["prediction"].astype(float)
+    error = prediction - actual
+    dry_actual = actual < 40.0
+    humid_actual = actual > 80.0
+    dry_predicted = prediction < 40.0
+    humid_predicted = prediction > 80.0
+    metrics: dict[str, object] = {
+        "dry_threshold": 40.0,
+        "humid_threshold": 80.0,
+        "dry_event_count": int(dry_actual.sum()),
+        "humid_event_count": int(humid_actual.sum()),
+        "dry_event_hit_rate": _safe_rate((dry_actual & dry_predicted).sum(), dry_actual.sum()),
+        "humid_event_hit_rate": _safe_rate((humid_actual & humid_predicted).sum(), humid_actual.sum()),
+        "low_rh_mae": _safe_mae(error[dry_actual]),
+        "high_rh_mae": _safe_mae(error[humid_actual]),
+        "dry_false_alarm_rate": _safe_rate((~dry_actual & dry_predicted).sum(), dry_predicted.sum()),
+        "humid_false_alarm_rate": _safe_rate((~humid_actual & humid_predicted).sum(), humid_predicted.sum()),
+    }
+    return metrics
 
 
 def build_worst_case_summary(predictions: pd.DataFrame) -> dict[str, object]:
@@ -343,14 +457,130 @@ def plot_daily_max_min_error(daily_errors: pd.DataFrame, output_path: str | Path
     axis.axhline(0.0, color="black", linewidth=0.8)
     axis.tick_params(axis="x", rotation=45)
     axis.legend()
-    axis.set_title("Daily Temperature Error")
+    target_label = _title_target_label(daily_errors)
+    axis.set_title(f"Daily {target_label} Error")
     figure.tight_layout()
     figure.savefig(path)
     plt.close(figure)
     return path
 
 
-def plot_extreme_temperature_scatter(predictions: pd.DataFrame, output_path: str | Path) -> Path | None:
+def plot_daily_diurnal_range_error(daily_errors: pd.DataFrame, output_path: str | Path) -> Path | None:
+    if daily_errors.empty or "diurnal_range_error" not in daily_errors.columns:
+        return None
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plot_frame = daily_errors.sort_values("valid_date").copy()
+    if "station_id" in plot_frame.columns and plot_frame["station_id"].nunique() > 1:
+        plot_frame = plot_frame.groupby("valid_date", as_index=False)[["diurnal_range_error"]].mean()
+    figure, axis = plt.subplots(figsize=(10, 4))
+    axis.plot(plot_frame["valid_date"].astype(str), plot_frame["diurnal_range_error"].astype(float), marker="o")
+    axis.axhline(0.0, color="black", linewidth=0.8)
+    axis.tick_params(axis="x", rotation=45)
+    axis.set_ylabel("Prediction - actual")
+    axis.set_title("Daily Diurnal Range Error")
+    figure.tight_layout()
+    figure.savefig(path)
+    plt.close(figure)
+    return path
+
+
+def plot_worst_station_timeseries(predictions: pd.DataFrame, output_path: str | Path) -> Path | None:
+    if predictions.empty or "station_id" not in predictions.columns or "valid_time" not in predictions.columns:
+        return None
+    metrics = compute_group_metrics(predictions, ["station_id"])
+    if metrics.empty:
+        return None
+    worst_station = str(metrics.sort_values("rmse", ascending=False).iloc[0]["station_id"])
+    frame = predictions.loc[predictions["station_id"].astype(str) == worst_station].copy().head(300)
+    if frame.empty:
+        return None
+    frame["valid_time"] = pd.to_datetime(frame["valid_time"], utc=True)
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(10, 4))
+    axis.plot(frame["valid_time"], frame["actual"], label="actual")
+    axis.plot(frame["valid_time"], frame["prediction"], label="prediction")
+    axis.tick_params(axis="x", rotation=30)
+    axis.legend()
+    axis.set_title(f"Worst Station Timeseries: {worst_station}")
+    figure.tight_layout()
+    figure.savefig(path)
+    plt.close(figure)
+    return path
+
+
+def plot_worst_horizon_samples(predictions: pd.DataFrame, output_path: str | Path) -> Path | None:
+    if predictions.empty or "horizon_step" not in predictions.columns:
+        return None
+    metrics = compute_group_metrics(predictions, ["horizon_step"])
+    if metrics.empty:
+        return None
+    worst_horizon = int(metrics.sort_values("rmse", ascending=False).iloc[0]["horizon_step"])
+    frame = predictions.loc[predictions["horizon_step"].astype(int) == worst_horizon].copy().head(1000)
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(5, 5))
+    axis.scatter(frame["actual"], frame["prediction"], s=12, alpha=0.55)
+    min_value = float(min(frame["actual"].min(), frame["prediction"].min()))
+    max_value = float(max(frame["actual"].max(), frame["prediction"].max()))
+    axis.plot([min_value, max_value], [min_value, max_value], color="black", linewidth=1.0)
+    axis.set_xlabel("Actual")
+    axis.set_ylabel("Prediction")
+    axis.set_title(f"Worst Horizon Samples: h{worst_horizon}")
+    figure.tight_layout()
+    figure.savefig(path)
+    plt.close(figure)
+    return path
+
+
+def plot_residual_scatter(predictions: pd.DataFrame, output_path: str | Path) -> Path | None:
+    if predictions.empty or not {"actual_residual", "predicted_residual"}.issubset(predictions.columns):
+        return None
+    frame = predictions.dropna(subset=["actual_residual", "predicted_residual"]).head(1000)
+    if frame.empty:
+        return None
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(5, 5))
+    axis.scatter(frame["actual_residual"], frame["predicted_residual"], s=12, alpha=0.55)
+    min_value = float(min(frame["actual_residual"].min(), frame["predicted_residual"].min()))
+    max_value = float(max(frame["actual_residual"].max(), frame["predicted_residual"].max()))
+    axis.plot([min_value, max_value], [min_value, max_value], color="black", linewidth=1.0)
+    axis.set_xlabel("Actual residual")
+    axis.set_ylabel("Predicted residual")
+    axis.set_title("Residual MOS Scatter")
+    figure.tight_layout()
+    figure.savefig(path)
+    plt.close(figure)
+    return path
+
+
+def plot_baseline_vs_final_scatter(predictions: pd.DataFrame, output_path: str | Path) -> Path | None:
+    if predictions.empty or "baseline_prediction" not in predictions.columns:
+        return None
+    frame = predictions.dropna(subset=["baseline_prediction", "prediction", "actual"]).head(1000)
+    if frame.empty:
+        return None
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(6, 5))
+    axis.scatter(frame["actual"], frame["baseline_prediction"], s=10, alpha=0.35, label="baseline")
+    axis.scatter(frame["actual"], frame["prediction"], s=10, alpha=0.35, label="final")
+    min_value = float(min(frame["actual"].min(), frame["baseline_prediction"].min(), frame["prediction"].min()))
+    max_value = float(max(frame["actual"].max(), frame["baseline_prediction"].max(), frame["prediction"].max()))
+    axis.plot([min_value, max_value], [min_value, max_value], color="black", linewidth=1.0)
+    axis.set_xlabel("Actual")
+    axis.set_ylabel("Prediction")
+    axis.legend()
+    axis.set_title("Baseline vs Final MOS")
+    figure.tight_layout()
+    figure.savefig(path)
+    plt.close(figure)
+    return path
+
+
+def plot_extreme_target_scatter(predictions: pd.DataFrame, output_path: str | Path) -> Path | None:
     if predictions.empty:
         return None
     actual = predictions["actual"].astype(float)
@@ -368,18 +598,60 @@ def plot_extreme_temperature_scatter(predictions: pd.DataFrame, output_path: str
     axis.plot([min_value, max_value], [min_value, max_value], color="black", linewidth=1.0)
     axis.set_xlabel("Actual")
     axis.set_ylabel("Prediction")
-    axis.set_title("Extreme Actual Quantiles Scatter")
+    axis.set_title(f"Extreme {_title_target_label(predictions)} Scatter")
     figure.tight_layout()
     figure.savefig(path)
     plt.close(figure)
     return path
 
 
+def plot_extreme_temperature_scatter(predictions: pd.DataFrame, output_path: str | Path) -> Path | None:
+    """Backward-compatible alias for older callers."""
+    return plot_extreme_target_scatter(predictions, output_path)
+
+
+def _target_label_for_frame(frame: pd.DataFrame) -> str:
+    if "target_name" not in frame.columns or frame.empty:
+        return "target"
+    targets = frame["target_name"].dropna().astype(str).unique().tolist()
+    return targets[0] if len(targets) == 1 else "target"
+
+
+def _title_target_label(frame: pd.DataFrame) -> str:
+    label = _target_label_for_frame(frame)
+    if label == "humidity":
+        return "Humidity"
+    if label == "temp":
+        return "Temperature"
+    return "Target"
+
+
+def _safe_rate(numerator, denominator) -> float | None:
+    denominator_value = int(denominator)
+    if denominator_value == 0:
+        return None
+    return float(int(numerator) / denominator_value)
+
+
+def _safe_mae(error: pd.Series) -> float | None:
+    if error.empty:
+        return None
+    return float(error.abs().mean())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a V2 experiment directory.")
     parser.add_argument("--experiment-dir", required=True)
+    parser.add_argument("--update-report", dest="update_report", action="store_true", default=True, help="Regenerate reports/experiment_report.html after evaluation (default).")
+    parser.add_argument("--no-update-report", dest="update_report", action="store_false", help="Skip automatic unified report generation.")
+    parser.add_argument("--report-output-dir", default="reports")
+    parser.add_argument("--report-title", default="기상 V1-V3 실험 리포트")
     args = parser.parse_args()
     summary = evaluate_experiment(args.experiment_dir)
+    if args.update_report:
+        from weather_korea_forecast.reporting.generate_report import build_report
+
+        build_report(experiments_root=Path("data/artifacts"), output_dir=Path(args.report_output_dir), title=args.report_title)
     print(summary)
 
 

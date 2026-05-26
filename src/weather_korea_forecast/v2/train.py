@@ -23,9 +23,19 @@ from weather_korea_forecast.v2.artifacts import (
 from weather_korea_forecast.v2.data import load_or_prepare_v2_training_table
 from weather_korea_forecast.v2.dataset import V2DatasetBundle, build_v2_dataset_bundle
 from weather_korea_forecast.v2.evaluate import evaluate_prediction_frame
+from weather_korea_forecast.v2.future_features import build_future_feature_metadata
+from weather_korea_forecast.v2.target_transforms import (
+    inverse_target_transform_value,
+    normalize_target_transform_config,
+)
 
 
 def train_v2_experiment(config: dict) -> Path:
+    if "ensemble" in config and ("data" not in config or "model" not in config):
+        from weather_korea_forecast.v2.ensemble import build_prediction_ensemble_from_config
+
+        return build_prediction_ensemble_from_config(config)
+
     resolved_model_config = resolve_model_config({"model": dict(config["model"])})
     training_table = load_or_prepare_v2_training_table(config)
     bundle = build_v2_dataset_bundle(training_table, config, backend=resolved_model_config["model"].get("backend", "fallback_torch"))
@@ -40,6 +50,7 @@ def train_v2_experiment(config: dict) -> Path:
     experiment_dir = create_experiment_dir(config)
     snapshot_config(experiment_dir, config)
     write_scaler_artifact(experiment_dir, bundle.scaler)
+    write_json(build_future_feature_metadata(config), experiment_dir / "future_feature_metadata.json")
 
     model = build_model(resolved_model_config, bundle)
     model_type = resolved_model_config["model"]["type"]
@@ -76,6 +87,7 @@ def train_v2_experiment(config: dict) -> Path:
 
     val_frame = apply_postprocessing(val_frame, config, bias_payload)
     test_frame = apply_postprocessing(test_frame, config, bias_payload)
+    write_table(val_frame, experiment_dir / "predictions_val.csv")
     write_table(test_frame, experiment_dir / "predictions_test.csv")
     _write_residual_component_predictions(model, test_loader, bundle, experiment_dir, config, bias_payload)
 
@@ -86,6 +98,8 @@ def train_v2_experiment(config: dict) -> Path:
 
     feature_importance = export_feature_importance(model, bundle)
     write_feature_importance(experiment_dir, feature_importance)
+    export_lgbm_grid_search_artifacts(model, experiment_dir)
+    export_horizon_model_artifacts(model, experiment_dir, bundle)
     horizon_model_metrics = export_horizon_model_metrics(model)
     if horizon_model_metrics is not None and not horizon_model_metrics.empty:
         write_table(horizon_model_metrics, experiment_dir / "horizon_model_metrics.csv")
@@ -118,6 +132,7 @@ def build_v2_prediction_frame(
         .to_dict("index")
     )
     scaler_group_column = getattr(bundle.scaler, "group_column", "station_id")
+    target_transform = normalize_target_transform_config(bundle.metadata.get("target_transform"))
     for sample_index in range(prediction_tensor.shape[0]):
         station_id = str(metadata["station_id"][sample_index])
         prediction_start = _ensure_utc_timestamp(metadata["prediction_start"][sample_index])
@@ -133,23 +148,58 @@ def build_v2_prediction_frame(
             valid_time = prediction_start + pd.Timedelta(hours=horizon_index)
             scaled_prediction = float(prediction_tensor[sample_index, horizon_index, 0].item())
             scaled_actual = float(target_tensor[sample_index, horizon_index, 0].item())
-            prediction = float(bundle.scaler.inverse_values("target_value", [scaled_prediction], groups=[scaler_group])[0])
-            actual = float(bundle.scaler.inverse_values("target_value", [scaled_actual], groups=[scaler_group])[0])
-            rows.append(
-                {
-                    "station_id": station_id,
-                    "prediction_start": prediction_start,
-                    "valid_time": valid_time,
-                    "horizon_step": horizon_index + 1,
-                    "target_name": bundle.target_name,
-                    "prediction": prediction,
-                    "actual": actual,
-                    "region_class": station_meta.get("region_class", "unknown"),
-                    "region": station_meta.get("region", station_meta.get("region_class", "unknown")),
-                    "season": _season_from_timestamp(valid_time),
-                }
-            )
+            prediction_model_value = float(bundle.scaler.inverse_values("target_value", [scaled_prediction], groups=[scaler_group])[0])
+            actual_model_value = float(bundle.scaler.inverse_values("target_value", [scaled_actual], groups=[scaler_group])[0])
+            target_context = _target_transform_context_for_row(metadata, bundle, sample_index, horizon_index)
+            prediction = inverse_target_transform_value(prediction_model_value, target_transform, target_context)
+            actual = inverse_target_transform_value(actual_model_value, target_transform, target_context)
+            row = {
+                "station_id": station_id,
+                "prediction_start": prediction_start,
+                "valid_time": valid_time,
+                "horizon_step": horizon_index + 1,
+                "target_name": bundle.target_name,
+                "prediction": prediction,
+                "actual": actual,
+                "prediction_model_value": prediction_model_value,
+                "actual_model_value": actual_model_value,
+                "region_class": station_meta.get("region_class", "unknown"),
+                "region": station_meta.get("region", station_meta.get("region_class", "unknown")),
+                "season": _season_from_timestamp(valid_time),
+            }
+            if target_transform.get("type") == "residual_from_feature" and target_context:
+                baseline = float(target_context.get("_target_context_baseline_value"))
+                row.update(
+                    {
+                        "baseline_prediction": baseline,
+                        "predicted_residual": prediction_model_value,
+                        "actual_residual": actual_model_value,
+                        "prediction_corrected": prediction,
+                    }
+                )
+            rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _target_transform_context_for_row(
+    metadata: dict[str, list],
+    bundle: V2DatasetBundle,
+    sample_index: int,
+    horizon_index: int,
+) -> dict[str, float] | None:
+    context_columns = list(bundle.metadata.get("target_context_columns", []))
+    if not context_columns:
+        return None
+    contexts = metadata.get("target_context", [])
+    if len(contexts) <= sample_index:
+        return None
+    sample_context = contexts[sample_index]
+    if hasattr(sample_context, "detach"):
+        sample_context = sample_context.detach().cpu()
+    values = sample_context[horizon_index]
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    return {column: float(value) for column, value in zip(context_columns, values)}
 
 
 def _scaler_group_for_sample(
@@ -543,6 +593,10 @@ def apply_postprocessing(prediction_frame: pd.DataFrame, config: dict, bias_payl
     clip_range = config["data"].get("postprocess", {}).get("clip_prediction")
     if clip_range:
         frame["prediction"] = frame["prediction"].clip(lower=float(clip_range[0]), upper=float(clip_range[1]))
+    frame["prediction_corrected"] = frame["prediction"]
+    if "actual" in frame.columns:
+        frame["error"] = frame["prediction"].astype(float) - frame["actual"].astype(float)
+        frame["abs_error"] = frame["error"].abs()
     return frame
 
 
@@ -593,6 +647,61 @@ def _apply_quantile_array(values: np.ndarray, prediction_quantiles, actual_quant
     return np.interp(values, prediction_knots, actual_knots, left=actual_knots[0], right=actual_knots[-1])
 
 
+def export_lgbm_grid_search_artifacts(model, experiment_dir: Path) -> None:
+    frames: list[pd.DataFrame] = []
+    best_payload: dict[str, object] = {}
+    for component_name, candidate in _iter_model_components(model):
+        if hasattr(candidate, "grid_search_results_frame"):
+            frame = candidate.grid_search_results_frame()
+            if frame is not None and not frame.empty:
+                frame = frame.copy()
+                frame.insert(0, "component", component_name)
+                frames.append(frame)
+        if hasattr(candidate, "best_params_dict"):
+            best_payload[component_name] = candidate.best_params_dict()
+    if frames:
+        write_table(pd.concat(frames, ignore_index=True), experiment_dir / "lgbm_grid_search_results.csv")
+    if best_payload:
+        write_json(best_payload, experiment_dir / "best_lgbm_params.json")
+
+
+def export_horizon_model_artifacts(model, experiment_dir: Path, bundle: V2DatasetBundle) -> None:
+    model_dir = experiment_dir / "model"
+    wrote = False
+    for component_name, candidate in _iter_model_components(model):
+        if hasattr(candidate, "horizon_metrics_frame"):
+            summary = candidate.horizon_metrics_frame()
+            if summary is not None and not summary.empty:
+                summary = summary.copy()
+                if "component" not in summary.columns:
+                    summary.insert(0, "component", component_name)
+                write_table(summary, experiment_dir / "horizon_model_summary.csv")
+        if hasattr(candidate, "feature_importance_frame"):
+            importance = candidate.feature_importance_frame(flattened_feature_names(bundle))
+            if importance is not None and not importance.empty and "horizon_step" in importance.columns:
+                importance = importance.copy()
+                if "component" not in importance.columns:
+                    importance.insert(0, "component", component_name)
+                write_table(importance, experiment_dir / "horizon_feature_importance.csv")
+        if candidate.__class__.__name__.lower().startswith("horizonwise"):
+            model_dir.mkdir(parents=True, exist_ok=True)
+            import pickle
+
+            for horizon_step in range(1, bundle.prediction_length + 1):
+                with (model_dir / f"horizon_{horizon_step:02d}.pkl").open("wb") as handle:
+                    pickle.dump({"component": component_name, "horizon_step": horizon_step, "model_class": candidate.__class__.__name__}, handle)
+                wrote = True
+    if wrote:
+        write_json({"horizon_model_count": bundle.prediction_length, "directory": str(model_dir)}, experiment_dir / "horizon_model_manifest.json")
+
+
+def _iter_model_components(model):
+    yield "main", model
+    for name in ("baseline_model", "residual_model"):
+        if hasattr(model, name):
+            yield name.replace("_model", ""), getattr(model, name)
+
+
 def export_feature_importance(model, bundle: V2DatasetBundle) -> pd.DataFrame | None:
     if not hasattr(model, "feature_importance_frame"):
         return None
@@ -636,13 +745,16 @@ def flattened_feature_names(bundle: V2DatasetBundle) -> list[str]:
 def _predict_baseline(model, loader) -> tuple[torch.Tensor, torch.Tensor, dict[str, list]]:
     predictions: list[torch.Tensor] = []
     targets: list[torch.Tensor] = []
-    metadata = {"station_id": [], "prediction_start": [], "region_class": []}
+    metadata = {"station_id": [], "prediction_start": [], "region_class": [], "target_context": []}
     for batch in loader:
         predictions.append(model.predict_batch(batch))
         targets.append(batch["target"])
         metadata["station_id"].extend(batch["station_id"])
         metadata["prediction_start"].extend(batch["prediction_start"])
         metadata["region_class"].extend(batch.get("region_class", []))
+        context = batch.get("target_context")
+        if context is not None:
+            metadata["target_context"].extend(context.cpu())
     return torch.cat(predictions), torch.cat(targets), metadata
 
 
@@ -667,10 +779,19 @@ def _season_from_timestamp(timestamp: pd.Timestamp) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a V2 experiment from a unified config.")
     parser.add_argument("--config", required=True)
+    parser.add_argument("--update-report", dest="update_report", action="store_true", default=True, help="Regenerate reports/experiment_report.html after training (default).")
+    parser.add_argument("--no-update-report", dest="update_report", action="store_false", help="Skip automatic unified report generation.")
+    parser.add_argument("--report-output-dir", default="reports")
+    parser.add_argument("--report-title", default="기상 V1-V3 실험 리포트")
     args = parser.parse_args()
 
     config = load_yaml(args.config)
-    train_v2_experiment(config)
+    experiment_dir = train_v2_experiment(config)
+    if args.update_report:
+        from weather_korea_forecast.reporting.generate_report import build_report
+
+        build_report(experiments_root=Path("data/artifacts"), output_dir=Path(args.report_output_dir), title=args.report_title)
+    return experiment_dir
 
 
 if __name__ == "__main__":

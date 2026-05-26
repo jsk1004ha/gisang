@@ -1,0 +1,228 @@
+artifacts:
+  root_dir: data/artifacts/v3_experiments
+  leaderboard_path: data/artifacts/v3_experiments/leaderboard.csv
+data:
+  cleaning:
+    interpolate_limit_hours: 12
+  era5:
+    extraction_mode: bilinear
+  feature_engineering:
+    delta_features:
+      target_value:
+      - 1
+      - 6
+      - 24
+    lag_features:
+      era5_sp:
+      - 1
+      - 6
+      - 24
+      era5_t2m:
+      - 1
+      - 3
+      - 6
+      - 12
+      - 24
+      obs_pressure:
+      - 1
+      - 6
+      - 24
+      obs_wind_speed:
+      - 1
+      - 6
+      - 24
+      target_value:
+      - 1
+      - 3
+      - 6
+      - 12
+      - 24
+      - 48
+      - 72
+      - 168
+    rolling_features:
+      target_value:
+      - 3
+      - 6
+      - 12
+      - 24
+  features:
+    decoder_known:
+    - hour_sin
+    - hour_cos
+    - doy_sin
+    - doy_cos
+    encoder_continuous:
+    - target_value
+    - target_value_lag_1
+    - target_value_lag_3
+    - target_value_lag_6
+    - target_value_lag_12
+    - target_value_lag_24
+    - target_value_lag_48
+    - target_value_lag_72
+    - target_value_lag_168
+    - target_value_same_hour_prev_day
+    - target_value_roll_mean_3
+    - target_value_roll_std_3
+    - target_value_roll_mean_6
+    - target_value_roll_std_6
+    - target_value_roll_mean_12
+    - target_value_roll_std_12
+    - target_value_roll_mean_24
+    - target_value_roll_std_24
+    - target_value_delta_1
+    - target_value_delta_6
+    - target_value_delta_24
+    - obs_pressure
+    - obs_wind_speed
+    - obs_precipitation
+    - era5_t2m
+    - era5_sp
+    - era5_u10
+    - era5_v10
+    - era5_tp
+    - hour_sin
+    - hour_cos
+    - doy_sin
+    - doy_cos
+    static_categoricals:
+    - station_id
+    - region_class
+    static_real:
+    - lat
+    - lon
+    - elevation
+    - coastal_distance_km
+  observation_columns:
+    datetime: datetime
+    humidity: humidity
+    precipitation: precipitation
+    pressure: pressure
+    quality_flag: quality_flag
+    station_id: station_id
+    temp: temp
+    wind_speed: wind_speed
+  postprocess:
+    clip_prediction: null
+  scaling:
+    columns:
+    - target_value
+    - target_value_lag_1
+    - target_value_lag_3
+    - target_value_lag_6
+    - target_value_lag_12
+    - target_value_lag_24
+    - target_value_lag_48
+    - target_value_lag_72
+    - target_value_lag_168
+    - target_value_same_hour_prev_day
+    - target_value_roll_mean_3
+    - target_value_roll_std_3
+    - target_value_roll_mean_6
+    - target_value_roll_std_6
+    - target_value_roll_mean_12
+    - target_value_roll_std_12
+    - target_value_roll_mean_24
+    - target_value_roll_std_24
+    - target_value_delta_1
+    - target_value_delta_6
+    - target_value_delta_24
+    - obs_pressure
+    - obs_wind_speed
+    - obs_precipitation
+    - era5_t2m
+    - era5_sp
+    - era5_u10
+    - era5_v10
+    - era5_tp
+    - lat
+    - lon
+    - elevation
+    - coastal_distance_km
+    group_column: station_id
+    mode: global
+  split:
+    test_end: 2025-02-28 23:00:00+00:00
+    train_end: 2024-12-31 23:00:00+00:00
+    val_end: 2025-01-31 23:00:00+00:00
+  target_name: temp
+  timezone:
+    source: Asia/Seoul
+  window:
+    encoder_length: 168
+    prediction_length: 24
+  future_features:
+    track: observation_only
+    source: none
+    operational_valid: false
+evaluation:
+  bias_correction:
+    apply_when: improves_on_holdout
+    calibration_fraction: 0.7
+    candidate_methods:
+    - mean_bias
+    - affine
+    - quantile
+    candidate_modes:
+    - global
+    - per_horizon
+    - per_station
+    - per_station_horizon
+    - per_season_horizon
+    - per_region_horizon
+    enabled: true
+    method: auto
+    min_improvement: 0.0
+    mode: auto
+    selection_metric: rmse
+experiment:
+  name: v3_temp_observation_only_horizonwise_ridge_168to24
+  version: v3
+  notes: V3 observation-only horizon-wise ridge baseline, separated from NWP-assisted
+    MOS leaderboard.
+model:
+  alpha: 1.0
+  alpha_grid:
+  - 0.001
+  - 0.001778
+  - 0.003162
+  - 0.005623
+  - 0.01
+  - 0.017783
+  - 0.031623
+  - 0.056234
+  - 0.1
+  - 0.177828
+  - 0.316228
+  - 0.562341
+  - 1.0
+  - 1.778279
+  - 3.162278
+  - 5.623413
+  - 10.0
+  - 17.782794
+  - 31.622777
+  - 56.234133
+  - 100.0
+  - 177.827941
+  - 316.227766
+  - 562.341325
+  - 1000.0
+  alpha_selection:
+    metric: val_mse
+  name: v3_temp_observation_only_horizonwise_ridge_168to24
+  type: horizon_wise_ridge
+paths:
+  era5_csv: data/raw/era5/asos_multistation_v2_station.csv
+  observation_csv: data/raw/asos/asos_multistation_v2.csv
+  output_data_quality: data/processed/v3_temp_observation_only_horizonwise_ridge_168to24/data_quality.json
+  output_training_table: data/processed/v3_temp_observation_only_horizonwise_ridge_168to24/training_table.csv
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+training:
+  batch_size: 64
+  device: cpu
+  early_stopping_patience: 1
+  gradient_clip_val: 0.0
+  max_epochs: 1
+  num_workers: 0

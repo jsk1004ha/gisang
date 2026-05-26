@@ -253,6 +253,7 @@ model:
 - `horizon_wise_ridge`: horizon 1~24 각각 별도 ridge head와 alpha를 학습하고 `horizon_model_metrics.csv`에 horizon별 alpha/RMSE/MAE/Bias를 저장한다.
 - `horizon_wise_lightgbm`: horizon별 direct LightGBM estimator를 명시적으로 쓰고 feature importance와 horizon별 validation metric을 저장한다.
 - `residual`: baseline 예측을 먼저 학습한 뒤 `actual - baseline` residual을 별도 모델이 학습하고 `baseline + residual`을 최종 예측으로 쓴다.
+- `decoder_feature_baseline`: `model.target_source_features`에 지정한 future-known decoder feature를 target으로 그대로 복사한다. forecast-model baseline이나 명시적 oracle/backtest ceiling 점검용이며, target leakage feature를 넣은 config는 운영 가능 실험으로 해석하면 안 된다.
 
 스케일링은 `data.scaling.mode`로 `global`, `stationwise`/`station_wise`, `regionwise`/`region_wise`, `none`을 선택할 수 있다. `scaler.json`에는 train split에서 fit한 global 및 group별 평균/표준편차가 저장된다.
 
@@ -265,6 +266,19 @@ python -m weather_korea_forecast.v2.predict ^
   --forecast-init-time 2025-01-03T00:00:00Z
 ```
 
+NWP-assisted/MOS 실전 추론은 future-valid forecast feature CSV를 함께 넘긴다. CSV는 `station_id`, `valid_time` 또는 `datetime`, 선택적 `issue_time`, 그리고 모델의 decoder weather feature에 대응되는 forecast columns를 가져야 한다. 예시는 [future_weather_forecast_template.csv](C:\Users\js100\Desktop\coding\gisang\configs\v2\templates\future_weather_forecast_template.csv)에 있다.
+
+```bash
+python -m weather_korea_forecast.v2.predict ^
+  --experiment-dir data/artifacts/v2_experiments/latest ^
+  --station-id 108 ^
+  --forecast-init-time 2025-01-03T00:00:00Z ^
+  --future-weather-csv data/raw/nwp/latest_station_forecast.csv ^
+  --output-csv data/artifacts/v2_experiments/latest/forecast_operational.csv
+```
+
+`data.future_features.column_mapping`은 forecast CSV 컬럼을 학습 feature 이름으로 매핑한다. 예: `era5_t2m: gfs_t2m`, `era5_sp: gfs_sp`, `era5_u10: gfs_u10`, `era5_v10: gfs_v10`, `era5_tp: gfs_tp`. `issue_time`이 있으면 `forecast_init_time` 이하의 최신 run을 선택한다. 운영 추론에서는 미래 weather covariate가 모든 horizon에 없으면 실행을 중단한다.
+
 ### V2 기본 실험 config
 
 - [v2_temp_seasonal_persistence.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_seasonal_persistence.yaml)
@@ -274,6 +288,10 @@ python -m weather_korea_forecast.v2.predict ^
 - [v2_temp_horizonwise_ridge_168to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_horizonwise_ridge_168to24.yaml)
 - [v2_temp_horizonwise_lgbm_168to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_horizonwise_lgbm_168to24.yaml)
 - [v2_temp_residual_lgbm_on_ridge_168to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_residual_lgbm_on_ridge_168to24.yaml)
+- [v2_temp_future_era5_ridge_72to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_future_era5_ridge_72to24.yaml)
+- [v2_temp_future_era5_residual_ridge_72to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_future_era5_residual_ridge_72to24.yaml)
+- [v2_temp_future_era5_residual_ridge_168to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_future_era5_residual_ridge_168to24.yaml)
+- [v2_temp_future_era5_residual_horizonwise_ridge_72to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_future_era5_residual_horizonwise_ridge_72to24.yaml)
 - [v2_temp_ridge_168to24_stationwise.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_ridge_168to24_stationwise.yaml)
 - [v2_temp_ridge_168to24_regionwise.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_ridge_168to24_regionwise.yaml)
 - [v2_temp_lgbm.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_temp_lgbm.yaml)
@@ -282,6 +300,21 @@ python -m weather_korea_forecast.v2.predict ^
 - [v2_humidity_ridge.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_ridge.yaml)
 - [v2_humidity_lgbm.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_lgbm.yaml)
 - [v2_humidity_tft.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_tft.yaml)
+- [v2_humidity_lgbm_fixed_features_72to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_lgbm_fixed_features_72to24.yaml)
+- [v2_humidity_lgbm_168to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_lgbm_168to24.yaml)
+- [v2_humidity_horizonwise_lgbm_72to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_horizonwise_lgbm_72to24.yaml)
+- [v2_humidity_horizonwise_lgbm_168to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_horizonwise_lgbm_168to24.yaml)
+- [v2_humidity_logit_rh_lgbm_168to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_logit_rh_lgbm_168to24.yaml)
+- [v2_humidity_dewpoint_lgbm_168to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_dewpoint_lgbm_168to24.yaml)
+- [v2_humidity_dewpoint_depression_lgbm_168to24.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_dewpoint_depression_lgbm_168to24.yaml)
+- [v2_humidity_lgbm_extreme_weighted.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_lgbm_extreme_weighted.yaml)
+- [v2_humidity_lgbm_quantile_calibrated.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\v2_humidity_lgbm_quantile_calibrated.yaml)
+
+습도 연구용 config는 `data.target_transform`으로 `logit_rh`, `dew_point`, `dew_point_depression`을 선택할 수 있다.
+`logit_rh`는 예측 후 RH(0~100)로 역변환하고, dew-point 계열은 `_target_context_temp_c` 온도 context로 RH를 복원한다.
+`data.sample_weighting.mode: humidity_extremes`는 `RH < 40`, `RH > 80` 같은 건조/고습 구간에 LightGBM sample weight를 줄 때 사용한다.
+
+미래 ERA5/NWP 계열 decoder covariate를 쓰는 온도 config는 observation-only 리더보드와 직접 비교하지 않는다. `data.future_features`로 `track`, `source`, `operational_valid`를 명시하고, artifact에는 `future_feature_metadata.json`이 저장된다. ERA5 reanalysis를 `decoder_known`에 넣은 config는 backtest/MOS upper-bound이며 실전 예보에서는 같은 변수 구조의 forecast NWP source로 교체해야 한다. `data.target_transform.type: residual_from_feature`는 예를 들어 `baseline_column: era5_t2m_c`를 기준으로 `target_value = observed_temp - era5_t2m_c`를 학습하고 예측 후 baseline을 다시 더해 절대기온으로 복원한다.
 
 `station metadata` 템플릿은 [station_metadata_template.csv](C:\Users\js100\Desktop\coding\gisang\configs\v2\templates\station_metadata_template.csv)에 포함되어 있다.
 
@@ -292,8 +325,98 @@ python -m weather_korea_forecast.v2.predict ^
 - [v2_humidity_ridge_seoul_q4q1.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\real\v2_humidity_ridge_seoul_q4q1.yaml)
 - [v2_humidity_lgbm_seoul_q4q1.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\real\v2_humidity_lgbm_seoul_q4q1.yaml)
 - [v2_humidity_tft_seoul_q4q1.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\real\v2_humidity_tft_seoul_q4q1.yaml)
+- [v2_humidity_lgbm_fixed_features_seoul_q4q1.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\real\v2_humidity_lgbm_fixed_features_seoul_q4q1.yaml)
+- [v2_humidity_era5_dewpoint_oracle_decoder_feature_seoul_q4q1.yaml](C:\Users\js100\Desktop\coding\gisang\configs\v2\experiments\real\v2_humidity_era5_dewpoint_oracle_decoder_feature_seoul_q4q1.yaml): 로컬 backtest-only oracle 예시다. 현재 서울 raw ERA5 파일에는 dew point가 없어 전처리된 `era5_dew_point_c`가 관측 습도에서 역산되므로, 이 config는 RMSE ceiling/누수 진단용이며 canonical benchmark나 운영 예보용이 아니다.
 
 이 예시는 `data/raw/asos/seoul_20241001_20250324.csv`, `data/raw/era5/seoul_20241001_20250324_station.csv`, `data/raw/metadata/stations.csv`를 사용한다.
+
+## V3 방향: station-level NWP-assisted MOS
+
+V3는 V2 코드를 재사용하되 실험 의미를 운영 구조에 맞게 분리하는 단계다. 자세한 개발 계획은 [docs/V3_V4_plan.md](C:\Users\js100\Desktop\coding\gisang\docs\V3_V4_plan.md)에 정리했다.
+
+첫 V3 config는 temperature MOS residual ridge다.
+
+```bash
+python -m weather_korea_forecast.v2.train ^
+  --config configs/v3/experiments/v3_temp_mos_residual_ridge_72to24.yaml
+```
+
+이 config는 `version: v3`와 `artifacts.root_dir: data/artifacts/v3_experiments`를 사용하지만, 안정화 전까지는 기존 V2 CLI로 실행한다. 핵심 target은 다음과 같다.
+
+```text
+baseline = future NWP/ERA5-style t2m
+target = observed_temp - baseline
+prediction = baseline + predicted_residual
+```
+
+V3 leaderboard에는 최소한 `forecast_track`, `uses_future_weather_features`, `future_feature_source`, `operational_valid`, `backtest_only`, `target_name`, `model_family`가 남아야 한다. 또한 umbrella 파일로 `leaderboard_observation_only.csv`, `leaderboard_nwp_assisted.csv`, target별 `leaderboard_temp.csv` / `leaderboard_humidity.csv`를 유지한다.
+
+ERA5 reanalysis decoder covariate를 쓰는 V3 starter config는 `forecast_track: nwp_assisted_mos`, `future_feature_source: era5_reanalysis`, `operational_valid: false`, `backtest_only: true`로 기록된다. 운영 예보에서는 같은 schema의 forecast NWP CSV를 `--future-weather-csv`로 넣어야 한다.
+
+정직한 습도 `RMSE < 1`을 시도하려면 valid-time reanalysis가 아니라 예보 발행시각이 있는 forecast archive가 필요하다. V3 NWP-MOS 경로는 `station_id`, `issue_time`, `valid_time`, `lead_hour`, `nwp_relative_humidity_2m` 등을 가진 CSV를 관측과 조인해 `actual - nwp_relative_humidity_2m` residual을 학습한다.
+
+```bash
+# 선택: NOAA GFS GRIB 추출에는 optional nwp extra가 필요하다.
+pip install -e ".[nwp,lgbm]"
+
+python -m weather_korea_forecast.data.gfs_surface_forecast ^
+  --station-metadata-csv data/raw/metadata/stations_v2.csv ^
+  --output-csv data/raw/nwp/gfs_humidity_surface_20241001_20250228.csv ^
+  --start-date 2024-10-01 ^
+  --end-date 2025-02-28 ^
+  --cycles 00,06,12,18 ^
+  --lead-hours 1-24 ^
+  --variables rh2m,t2m,d2m,sp,u10,v10,tp
+
+python -m weather_korea_forecast.v3.nwp_mos ^
+  --config configs/v3/experiments/v3_humidity_nwp_mos_lgbm_72to24.yaml
+```
+
+이 경로는 forecast archive의 `issue_time`과 `lead_hour`를 샘플 키로 사용하므로, 나중에 발행된 예보나 미래 관측 습도를 학습 feature로 쓰지 않는다. 단, 실제 `RMSE < 1` 달성 여부는 제공된 NWP 습도 예보 자체의 정확도에 좌우된다.
+
+RMSE ceiling 또는 누수 진단이 필요할 때는 `configs/v3/experiments/diagnostic/v3_temp_observed_oracle_decoder_feature_72to24.yaml`과 `configs/v3/experiments/diagnostic/v3_humidity_observed_oracle_decoder_feature_72to24.yaml`을 사용할 수 있다. 이 config들은 decoder의 미래 `target_value`를 그대로 복사하므로 실제 미래 관측값을 사용한 backtest-only oracle이며, `forecast_track: observed_target_oracle`, `operational_valid: false`, `backtest_only: true`로 기록된다. 운영 예보 성능으로 해석하면 안 된다.
+
+V3 습도 track은 RH 직접 예측과 별개로 물리 target을 비교한다.
+
+```bash
+python -m weather_korea_forecast.v2.train ^
+  --config configs/v3/experiments/v3_humidity_direct_lgbm_72to24.yaml
+
+python -m weather_korea_forecast.v2.train ^
+  --config configs/v3/experiments/v3_humidity_dewpoint_lgbm_72to24.yaml
+
+python -m weather_korea_forecast.v2.train ^
+  --config configs/v3/experiments/v3_humidity_dewpoint_depression_lgbm_72to24.yaml
+```
+
+세 config 모두 `version: v3`, `artifacts.root_dir: data/artifacts/v3_experiments`를 사용한다. Direct RH는 바로 `0..100`으로 clip하고, dew point/depression track은 temperature context로 RH를 복원한 뒤 `0..100`으로 clip한다.
+
+여러 습도 track을 결합해 더 강한 예측 artifact를 만들 때는 prediction ensemble CLI를 사용한다.
+
+```bash
+python -m weather_korea_forecast.v2.ensemble ^
+  --experiment-dir data/artifacts/v3_experiments/v3_humidity_direct_lgbm_72to24_YYYYMMDDTHHMMSSZ ^
+  --experiment-dir data/artifacts/v3_experiments/v3_humidity_dewpoint_lgbm_72to24_YYYYMMDDTHHMMSSZ ^
+  --experiment-dir data/artifacts/v3_experiments/v3_humidity_dewpoint_depression_lgbm_72to24_YYYYMMDDTHHMMSSZ ^
+  --output-root data/artifacts/v3_experiments ^
+  --name v3_humidity_mean_ensemble_72to24 ^
+  --method mean ^
+  --clip-min 0 --clip-max 100 ^
+  --leaderboard-path data/artifacts/v3_experiments/leaderboard.csv
+```
+
+이 CLI는 component `predictions_test.csv`를 key 기준으로 정렬/검증한 뒤 평균 또는 median ensemble을 만들고, 동일한 V2 evaluator로 `metrics_test.json`, station/region/horizon report, `leaderboard_humidity.csv`를 갱신한다.
+
+로컬 웹에서 예측/실험 현황을 보려면 dependency 없는 dashboard 서버를 실행한다.
+
+```bash
+python -m weather_korea_forecast.dashboard.app ^
+  --artifact-root data/artifacts/v3_experiments ^
+  --host 127.0.0.1 ^
+  --port 8765
+```
+
+브라우저에서 `http://127.0.0.1:8765/`를 열면 target/track별 best, latest/best alias, leaderboard, comparison report 링크를 볼 수 있다. 정적 HTML snapshot만 만들려면 `--write-html data/artifacts/v3_experiments/dashboard.html`을 사용한다.
 
 ### V2 데이터 요구사항
 
@@ -301,7 +424,7 @@ V2는 실제로는 다음 로컬 파일이 채워져 있어야 동작한다.
 
 - `paths.observation_csv`: 다관측소 ASOS hourly CSV
 - `paths.era5_csv`: station-level ERA5 extracted CSV 또는 grid source
-- `paths.station_metadata_csv`: `station_id, lat, lon, elevation, region_class, coastal_distance_km`
+- `paths.station_metadata_csv`: `station_id, lat, lon, elevation, region_class, coastal_distance_km` plus optional `terrain_class`, `coastal_class`
 
 즉 저장소에는 V2 파이프라인과 config가 포함되어 있고, 사용자는 로컬 데이터 경로만 맞추면 된다.
 
@@ -505,21 +628,25 @@ V2는 별도 루트인 `data/artifacts/v2_experiments/` 아래에 저장되며, 
 - `station_rmse_bar.png`
 - `region_rmse_bar.png`
 - `daily_max_min_error.png`
-- `extreme_temperature_scatter.png`
+- `extreme_target_scatter.png`
 - `bias_correction.json`
+- `future_feature_metadata.json`
 - `worst_case_samples.csv`
 - `worst_case_summary.json`
 - `feature_importance.csv`
 - `horizon_model_metrics.csv`
 - `predictions_test_components.csv` for residual experiments
-- `daily_temperature_errors.csv`
-- `metrics_daily_temperature.csv`
+- `daily_target_errors.csv`
+- `metrics_daily_target.csv`
+- `metrics_humidity_extremes.csv` for humidity-only dry/humid event metrics
 - `metrics_target_name_rolling_origin_fold.csv`
 - `experiment_summary.json`
 - `experiment_summary.md`
 - `leaderboard.csv`
 - `leaderboard_temp.csv`
 - `leaderboard_humidity.csv`
+- `leaderboard_observation_only.csv`
+- `leaderboard_nwp_assisted.csv`
 
 `leaderboard.csv`에는 최소한 아래 컬럼이 저장된다.
 
@@ -531,6 +658,10 @@ V2는 별도 루트인 `data/artifacts/v2_experiments/` 아래에 저장되며, 
 - `encoder_length`
 - `prediction_length`
 - `scaling_mode`
+- `forecast_track`
+- `uses_future_nwp_features`
+- `future_feature_source`
+- `operational_valid`
 - `num_stations`
 - `train_period`
 - `val_period`
@@ -543,6 +674,11 @@ V2는 별도 루트인 `data/artifacts/v2_experiments/` 아래에 저장되며, 
 - `mae_corrected`
 - `bias_raw`
 - `bias_corrected`
+- `daily_max_temp_mae`
+- `daily_min_temp_mae`
+- `diurnal_range_mae`
+- `diurnal_range_bias`
+- `daily_score`
 - `notes`
 
 ## 평가 항목
@@ -570,9 +706,10 @@ V2 평가에서는 추가로 아래를 기본 저장한다.
 - horizon별 RMSE / MAE / Bias
 - station별 / region별 / season별 breakdown
 - station×horizon RMSE heatmap
-- daily max/min temperature error
-- diurnal range error
-- extreme-temperature scatter
+- daily max/min target error
+- daily target range error
+- extreme-target scatter
+- humidity dry/humid event hit rates and low/high RH MAE when `target_name: humidity`
 - worst-case summary JSON
 - rolling-origin slice report
 - worst-case sample table
@@ -610,3 +747,77 @@ V2 평가에서는 추가로 아래를 기본 저장한다.
 ## 한 줄 요약
 
 이 프로젝트는 **원본 기상 데이터를 모델이 학습 가능한 시계열 데이터셋으로 변환하고, 학습-예측-평가-개선 루프를 반복할 수 있게 만드는 한국 기상 예측 시스템의 기본 골격**이다.
+
+### V3 temperature MOS experiment order
+
+Run the temperature NWP-assisted/MOS track separately from observation-only baselines:
+
+```bash
+python -m weather_korea_forecast.v2.train --config configs/v3/experiments/v3_temp_mos_residual_ridge_72to24.yaml
+python -m weather_korea_forecast.v2.train --config configs/v3/experiments/v3_temp_mos_residual_ridge_168to24.yaml
+python -m weather_korea_forecast.v2.train --config configs/v3/experiments/v3_temp_mos_horizonwise_residual_ridge_72to24.yaml
+python -m weather_korea_forecast.v2.train --config configs/v3/experiments/v3_temp_mos_residual_lgbm_72to24.yaml
+```
+
+Then ensemble aligned artifacts with:
+
+```bash
+python -m weather_korea_forecast.v2.ensemble \
+  --experiment-dir <ridge-72-experiment-dir> \
+  --experiment-dir <lgbm-72-experiment-dir> \
+  --output-root data/artifacts/v3_experiments \
+  --name v3_temp_mos_ensemble_ridge_lgbm_72to24 \
+  --method mean \
+  --leaderboard-path data/artifacts/v3_experiments/leaderboard.csv
+```
+
+V3 residual MOS `predictions_test.csv` includes `baseline_prediction`, `predicted_residual`, `actual_residual`, `prediction_raw`, `prediction_corrected`, `error`, and `abs_error`.  The leaderboard adds `track`, `leakage_risk_note`, and `worst_station_rmse`.  ERA5 reanalysis future features remain backtest-only; use `--operational` during inference to fail fast if a saved experiment still depends on backtest-only future covariates.
+
+## 통합 실험 리포트 생성
+
+V1/V2/V3 실험 결과가 각 experiment directory에 흩어지는 문제를 줄이기 위해
+단일 CSV/HTML 리포트를 생성할 수 있다. HTML은 외부 CDN 없이 CSS/JS와 PNG 이미지를
+내장하므로 파일 하나만 열어도 주요 plot과 leaderboard를 볼 수 있다.
+
+```bash
+PYTHONPATH=src .venv312/Scripts/python.exe -m weather_korea_forecast.reporting.generate_report \
+  --experiments-root data/artifacts \
+  --output-dir reports \
+  --title "기상 V1-V3 통합 실험 리포트" \
+  --embed-images thumbnail
+```
+
+생성 파일:
+
+- `reports/experiment_report.html`
+- `reports/experiment_summary.csv`
+- `reports/experiment_summary.json`
+- `reports/best_models.csv`
+- `reports/failed_or_incomplete_experiments.csv`
+
+HTML 리포트는 `version`, `target_name`, `track`, `model_type`,
+`future_feature_source`, `operational_valid`, `rmse_goal_met` 필터를 제공한다.
+V3 목표 기준은 temp NWP-assisted MOS `RMSE <= 1.0°C`, temp observation-only
+`RMSE <= 2.0°C`, humidity `RMSE <= 10%p`로 자동 계산된다.
+단, `oracle`, `decoder_feature_baseline`, `observed_target_oracle`, `rmse=0`인
+backtest-only sanity check는 `is_diagnostic=true`로 분리되어 main leaderboard,
+KPI, `best_models.csv`, RMSE 목표 달성 수에서 제외된다. `best`/`latest` alias
+artifact도 상세 섹션에는 남기지만 main leaderboard 대표 run 산정에서는 제외된다.
+CSV/JSON에는 `included_in_main_leaderboard` 컬럼이 함께 저장되며, HTML main
+leaderboard와 chart는 이 값이 true인 대표 non-diagnostic run만 사용한다.
+이미지는 `--embed-images full|thumbnail|external-assets`로 제어할 수 있으며,
+기본값은 standalone HTML을 위한 `full` base64 embed다.
+
+학습/평가 CLI는 기본적으로 이 통합 CSV/HTML 리포트를 자동 갱신한다. 빠른
+실험이나 CI에서 리포트 생성을 건너뛰고 싶을 때만 `--no-update-report`를 사용한다.
+
+```bash
+PYTHONPATH=src .venv312/Scripts/python.exe -m weather_korea_forecast.v2.train \
+  --config configs/v3/experiments/v3_temp_mos_residual_ridge_72to24.yaml
+```
+
+V3 NWP-assisted/MOS 실험은 observation-only와 별도 track으로 비교해야 한다.
+`future_feature_source: era5_reanalysis` 또는 `era5_reanalysis_backtest`는
+backtest-only로 표시되며, 운영 추론에서는 `--operational`이 이러한 모델을 차단한다.
+prepared forecast CSV를 쓰는 경우 `prepared_forecast_csv`, `gfs_forecast`,
+`ecmwf_forecast`, `kma_forecast` 중 하나로 source를 명시한다.

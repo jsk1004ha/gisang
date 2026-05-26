@@ -1,0 +1,105 @@
+experiment:
+  name: v3_humidity_nwp_mos_lgbm_72to24
+  version: v3
+  notes: >-
+    Honest humidity NWP-MOS experiment. Requires a prepared forecast archive with
+    station_id, issue_time, valid_time, lead_hour, and future NWP humidity/dew-point
+    covariates. This path is issue-time aligned and must not use future observed
+    humidity or target-derived ERA5 dew point.
+paths:
+  # Build this with python -m weather_korea_forecast.data.gfs_surface_forecast
+  # or provide an equivalent KMA/ECMWF/GFS forecast archive.
+  nwp_forecast_csv: data/raw/nwp/gfs_humidity_surface_20241001_20250228.csv
+  base_training_config: configs/v3/experiments/v3_humidity_direct_lgbm_72to24.yaml
+  output_training_table: data/processed/v3_humidity_direct_lgbm_72to24/training_table.csv
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+data:
+  target_name: humidity
+  base_training_config: configs/v3/experiments/v3_humidity_direct_lgbm_72to24.yaml
+  min_lead_hour: 1
+  window:
+    prediction_length: 24
+  features:
+    nwp_features:
+      - nwp_relative_humidity_2m
+      - nwp_temp_2m_c
+      - nwp_dew_point_2m_c
+      - nwp_dew_point_depression
+      - nwp_surface_pressure
+      - nwp_u10
+      - nwp_v10
+      - nwp_wind_speed
+      - nwp_total_precipitation
+    init_features:
+      - obs_temp
+      - obs_humidity
+      - obs_dew_point_c
+      - obs_dew_point_depression
+      - obs_pressure
+      - obs_wind_speed
+      - obs_precipitation
+      - obs_vapor_pressure_hpa
+      - obs_absolute_humidity_g_m3
+      - target_value
+      - target_value_lag_1
+      - target_value_lag_3
+      - target_value_lag_6
+      - target_value_lag_12
+      - target_value_lag_24
+      - target_value_lag_48
+      - target_value_lag_72
+      - target_value_lag_168
+      - target_value_roll_mean_3
+      - target_value_roll_mean_6
+      - target_value_roll_mean_12
+      - target_value_roll_mean_24
+      - target_value_delta_1
+      - target_value_delta_6
+      - target_value_delta_24
+      - obs_humidity_delta_1
+      - obs_humidity_delta_6
+      - obs_humidity_delta_24
+      - obs_temp_delta_1
+      - obs_temp_delta_6
+      - obs_temp_delta_24
+    static_features:
+      - lat
+      - lon
+      - elevation
+      - coastal_distance_km
+  postprocess:
+    clip_prediction: [0, 100]
+  future_features:
+    track: nwp_assisted_mos
+    source: gfs_forecast
+    operational_valid: true
+    weather_columns:
+      - nwp_relative_humidity_2m
+      - nwp_temp_2m_c
+      - nwp_dew_point_2m_c
+      - nwp_dew_point_depression
+      - nwp_surface_pressure
+      - nwp_u10
+      - nwp_v10
+      - nwp_wind_speed
+      - nwp_total_precipitation
+    note: >-
+      Operational-valid only when nwp_forecast_csv is built from forecasts issued
+      at or before each issue_time. Do not substitute ERA5 analysis or target-derived
+      future humidity/dew point.
+model:
+  name: v3_humidity_nwp_mos_lgbm_72to24
+  type: nwp_mos_lightgbm
+  residual: true
+  baseline_column: nwp_relative_humidity_2m
+  params:
+    n_estimators: 800
+    learning_rate: 0.03
+    num_leaves: 63
+    min_child_samples: 20
+    subsample: 0.9
+    colsample_bytree: 0.9
+    random_state: 20260518
+    n_jobs: 8
+artifacts:
+  root_dir: data/artifacts/v3_nwp_mos_experiments

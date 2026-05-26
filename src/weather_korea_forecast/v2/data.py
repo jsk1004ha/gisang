@@ -13,6 +13,15 @@ from weather_korea_forecast.data.station_metadata import load_station_metadata
 from weather_korea_forecast.features.time_features import add_time_features
 from weather_korea_forecast.utils.io import read_table, write_json, write_table
 from weather_korea_forecast.utils.paths import resolve_path
+from weather_korea_forecast.v2.target_transforms import (
+    absolute_humidity_g_m3,
+    append_target_transform_context,
+    apply_target_transform,
+    dew_point_from_relative_humidity,
+    saturation_vapor_pressure_hpa,
+    temperature_series_to_celsius,
+    vapor_pressure_hpa,
+)
 
 
 def build_v2_training_table(config: dict) -> tuple[pd.DataFrame, dict[str, object]]:
@@ -39,7 +48,9 @@ def build_v2_training_table(config: dict) -> tuple[pd.DataFrame, dict[str, objec
     merged = _ensure_region_columns(merged)
     merged = _add_observation_aliases(merged)
     merged = _add_physical_features(merged)
-    merged["target_value"] = merged[target_name].astype(float)
+    merged = _merge_predicted_temperature_features(merged, config)
+    merged = append_target_transform_context(merged, data_config.get("target_transform"))
+    merged["target_value"] = apply_target_transform(merged, target_name, data_config.get("target_transform"))
     merged["target_name"] = target_name
     merged = _fill_raw_continuous_columns(merged, config)
     merged = _apply_feature_engineering(merged, config)
@@ -48,6 +59,9 @@ def build_v2_training_table(config: dict) -> tuple[pd.DataFrame, dict[str, objec
     merged["quality_flag"] = merged.get("quality_flag", "").fillna("")
 
     quality_report = summarize_time_index_quality(merged)
+    quality_report["era5_feature_sanity"] = summarize_era5_feature_sanity(merged)
+    if target_name == "humidity":
+        quality_report["humidity_feature_sanity"] = summarize_humidity_feature_sanity(merged, config)
     return merged, quality_report
 
 
@@ -82,6 +96,87 @@ def summarize_time_index_quality(frame: pd.DataFrame) -> dict[str, object]:
         "station_count": int(frame["station_id"].nunique()) if "station_id" in frame.columns else 0,
         "stations": rows,
     }
+
+
+def summarize_era5_feature_sanity(frame: pd.DataFrame) -> dict[str, object]:
+    checks: dict[str, object] = {}
+    warnings: list[str] = []
+    for column, bounds in {
+        "era5_t2m": (-80.0, 60.0),
+        "era5_t2m_c": (-80.0, 60.0),
+        "era5_dew_point_c": (-100.0, 50.0),
+        "era5_dew_point_depression": (-5.0, 80.0),
+    }.items():
+        if column not in frame.columns:
+            continue
+        series = frame[column].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+        if series.empty:
+            continue
+        column_summary = {
+            "min": float(series.min()),
+            "max": float(series.max()),
+            "mean": float(series.mean()),
+        }
+        checks[column] = column_summary
+        lower, upper = bounds
+        if column_summary["min"] < lower or column_summary["max"] > upper:
+            warnings.append(f"{column} outside expected Celsius range [{lower}, {upper}]: {column_summary}")
+    checks["warnings"] = warnings
+    return checks
+
+
+def summarize_humidity_feature_sanity(frame: pd.DataFrame, config: dict) -> dict[str, object]:
+    """Sanity checks for humidity experiments where dew point/time features matter.
+
+    The function reports warnings rather than failing preparation so existing
+    experiments remain reproducible, but it makes Kelvin-like dew point values
+    and missing diurnal/seasonal covariates visible in data-quality artifacts.
+    """
+
+    features = config.get("data", {}).get("features", {})
+    configured = {
+        str(column)
+        for section in ("encoder_continuous", "decoder_known", "static_real", "static_categoricals")
+        for column in features.get(section, [])
+    }
+    required_time_features = ["hour_sin", "hour_cos", "doy_sin", "doy_cos"]
+    missing_configured = [column for column in required_time_features if column not in configured]
+    missing_frame = [column for column in required_time_features if column not in frame.columns]
+    warnings: list[str] = []
+    if missing_configured:
+        warnings.append("humidity time features missing from config: " + ", ".join(missing_configured))
+    if missing_frame:
+        warnings.append("humidity time features missing from table: " + ", ".join(missing_frame))
+
+    checks: dict[str, object] = {
+        "required_time_features": required_time_features,
+        "missing_configured_time_features": missing_configured,
+        "missing_frame_time_features": missing_frame,
+    }
+    for column in ("era5_dew_point_c", "era5_t2m_c", "era5_dew_point_depression"):
+        if column not in frame.columns:
+            continue
+        series = frame[column].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+        if series.empty:
+            continue
+        summary = {"min": float(series.min()), "max": float(series.max()), "mean": float(series.mean())}
+        checks[column] = summary
+        if column in {"era5_dew_point_c", "era5_t2m_c"} and (summary["mean"] > 100.0 or summary["max"] > 100.0):
+            warnings.append(f"{column} appears to be Kelvin; convert to Celsius before humidity modeling: {summary}")
+        if column == "era5_dew_point_depression" and (summary["min"] < -5.0 or summary["max"] > 80.0):
+            warnings.append(f"{column} outside expected physical range: {summary}")
+
+    humidity_column = "humidity" if "humidity" in frame.columns else "target_value" if config.get("data", {}).get("target_name") == "humidity" and "target_value" in frame.columns else None
+    if humidity_column is not None:
+        series = frame[humidity_column].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+        if not series.empty:
+            summary = {"min": float(series.min()), "max": float(series.max()), "mean": float(series.mean())}
+            checks["relative_humidity"] = summary
+            if summary["min"] < 0.0 or summary["max"] > 100.0:
+                warnings.append(f"relative humidity outside [0, 100]: {summary}")
+
+    checks["warnings"] = warnings
+    return checks
 
 
 def _load_observations_from_config(config: dict) -> pd.DataFrame:
@@ -165,18 +260,91 @@ def _add_physical_features(frame: pd.DataFrame) -> pd.DataFrame:
     if {"temp", "humidity"}.issubset(enriched.columns):
         temp = enriched["temp"].astype(float)
         humidity = enriched["humidity"].astype(float).clip(lower=1e-3, upper=100.0)
-        alpha = np.log(humidity / 100.0) + (17.625 * temp) / (243.04 + temp)
-        dew_point = 243.04 * alpha / (17.625 - alpha)
+        dew_point = dew_point_from_relative_humidity(temp, humidity)
         enriched["obs_dew_point_c"] = dew_point
         enriched["obs_dew_point_depression"] = temp - dew_point
-    if {"era5_t2m", "humidity"}.issubset(enriched.columns):
-        era5_temp = enriched["era5_t2m"].astype(float)
-        humidity = enriched["humidity"].astype(float).clip(lower=1e-3, upper=100.0)
-        alpha = np.log(humidity / 100.0) + (17.625 * era5_temp) / (243.04 + era5_temp)
-        era5_dew_point = 243.04 * alpha / (17.625 - alpha)
+        enriched["obs_saturation_vapor_pressure_hpa"] = saturation_vapor_pressure_hpa(temp)
+        enriched["obs_vapor_pressure_hpa"] = vapor_pressure_hpa(temp, humidity)
+        enriched["obs_absolute_humidity_g_m3"] = absolute_humidity_g_m3(temp, humidity)
+    if "era5_t2m" in enriched.columns:
+        era5_temp_c = temperature_series_to_celsius(enriched["era5_t2m"])
+        enriched["era5_t2m"] = era5_temp_c
+        enriched["era5_t2m_c"] = era5_temp_c
+    else:
+        era5_temp_c = None
+    dew_point_column = _era5_dew_point_column(enriched)
+    if dew_point_column is not None:
+        era5_dew_point = temperature_series_to_celsius(enriched[dew_point_column])
         enriched["era5_dew_point_c"] = era5_dew_point
-        enriched["era5_dew_point_depression"] = era5_temp - era5_dew_point
+    elif era5_temp_c is not None and "humidity" in enriched.columns:
+        humidity = enriched["humidity"].astype(float).clip(lower=1e-3, upper=100.0)
+        enriched["era5_dew_point_c"] = dew_point_from_relative_humidity(era5_temp_c, humidity)
+    if era5_temp_c is not None and "era5_dew_point_c" in enriched.columns:
+        enriched["era5_dew_point_depression"] = era5_temp_c.astype(float) - enriched["era5_dew_point_c"].astype(float)
+    if era5_temp_c is not None:
+        enriched["nwp_temp_c"] = era5_temp_c.astype(float)
+        # Generic V3 MOS aliases let the same residual/bias features work with
+        # ERA5 backtests today and forecast NWP adapters later.
+        if "era5_sp" in enriched.columns and "nwp_sp" not in enriched.columns:
+            enriched["nwp_sp"] = enriched["era5_sp"]
+        if "era5_u10" in enriched.columns and "nwp_u10" not in enriched.columns:
+            enriched["nwp_u10"] = enriched["era5_u10"]
+        if "era5_v10" in enriched.columns and "nwp_v10" not in enriched.columns:
+            enriched["nwp_v10"] = enriched["era5_v10"]
+        if "era5_tp" in enriched.columns and "nwp_tp" not in enriched.columns:
+            enriched["nwp_tp"] = enriched["era5_tp"]
+    if era5_temp_c is not None and "temp" in enriched.columns:
+        enriched["obs_minus_era5_temp"] = enriched["temp"].astype(float) - era5_temp_c.astype(float)
+        enriched["obs_minus_nwp_temp"] = enriched["temp"].astype(float) - enriched["nwp_temp_c"].astype(float)
+    if {"era5_u10", "era5_v10"}.issubset(enriched.columns):
+        u10 = enriched["era5_u10"].astype(float)
+        v10 = enriched["era5_v10"].astype(float)
+        speed = np.sqrt(np.square(u10) + np.square(v10))
+        direction = np.arctan2(u10, v10)
+        enriched["era5_wind_speed"] = speed
+        enriched["era5_wind_dir_sin"] = np.sin(direction)
+        enriched["era5_wind_dir_cos"] = np.cos(direction)
+    if "precipitation" in enriched.columns:
+        enriched["precipitation_flag"] = (enriched["precipitation"].astype(float) > 0.0).astype(int)
     return enriched
+
+
+def _era5_dew_point_column(frame: pd.DataFrame) -> str | None:
+    candidates = [
+        "era5_d2m",
+        "era5_dew_point",
+        "era5_dewpoint",
+        "era5_dew_point_temperature",
+        "era5_2m_dewpoint_temperature",
+    ]
+    return next((column for column in candidates if column in frame.columns), None)
+
+
+def _merge_predicted_temperature_features(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
+    path = config.get("paths", {}).get("predicted_temperature_csv")
+    if not path:
+        return frame
+    prediction_path = resolve_path(path)
+    if not prediction_path.exists():
+        raise FileNotFoundError(f"Configured predicted temperature feature file does not exist: {prediction_path}")
+    predicted = read_table(prediction_path).copy()
+    if "station_id" not in predicted.columns:
+        raise ValueError("predicted_temperature_csv requires a station_id column.")
+    timestamp_column = next((column for column in ("datetime", "valid_time", "timestamp") if column in predicted.columns), None)
+    if timestamp_column is None:
+        raise ValueError("predicted_temperature_csv requires one of datetime, valid_time, or timestamp.")
+    value_column = next((column for column in ("predicted_temp", "prediction", "temp_prediction") if column in predicted.columns), None)
+    if value_column is None:
+        raise ValueError("predicted_temperature_csv requires one of predicted_temp, prediction, or temp_prediction.")
+
+    predicted = predicted.rename(columns={timestamp_column: "datetime", value_column: "predicted_temp"})
+    predicted["station_id"] = predicted["station_id"].astype(str)
+    predicted["datetime"] = pd.to_datetime(predicted["datetime"], utc=True)
+    merged = frame.merge(predicted[["station_id", "datetime", "predicted_temp"]], on=["station_id", "datetime"], how="left")
+    merged["predicted_temp_delta"] = merged["predicted_temp"].astype(float) - merged.get("obs_temp", merged.get("temp")).astype(float)
+    grouped = merged.sort_values(["station_id", "datetime"]).groupby("station_id", group_keys=False)
+    merged["predicted_temp_vs_prev_day"] = grouped["predicted_temp"].transform(lambda series: series - series.shift(24))
+    return merged
 
 
 def _fill_raw_continuous_columns(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
@@ -186,7 +354,10 @@ def _fill_raw_continuous_columns(frame: pd.DataFrame, config: dict) -> pd.DataFr
     numeric_columns = [
         column
         for column in enriched.columns
-        if column.startswith("obs_") or column.startswith("era5_") or column in {"target_value", "coastal_distance_km"}
+        if column.startswith("obs_")
+        or column.startswith("era5_")
+        or column.startswith("_target_context")
+        or column in {"target_value", "coastal_distance_km"}
     ]
     static_numeric_columns = data_config.get("features", {}).get("static_real", [])
     numeric_columns.extend([column for column in static_numeric_columns if column in enriched.columns])
@@ -220,6 +391,7 @@ def _apply_feature_engineering(frame: pd.DataFrame, config: dict) -> pd.DataFram
             "obs_dew_point_depression": [1, 3, 6, 24],
             "era5_t2m": [1, 3, 6, 12, 24],
             "era5_sp": [1, 6, 24],
+            "obs_minus_nwp_temp": [1, 3, 6, 12, 24, 48, 72],
         },
     )
     rolling_features = feature_config.get(
@@ -228,6 +400,7 @@ def _apply_feature_engineering(frame: pd.DataFrame, config: dict) -> pd.DataFram
             "target_value": [3, 6, 12, 24],
             "obs_humidity": [6, 24],
             "obs_temp": [6, 24],
+            "obs_minus_nwp_temp": [6, 24, 72],
         },
     )
     delta_features = feature_config.get(
@@ -236,8 +409,14 @@ def _apply_feature_engineering(frame: pd.DataFrame, config: dict) -> pd.DataFram
             "target_value": [1, 6, 24],
             "obs_humidity": [1, 6, 24],
             "obs_temp": [1, 6, 24],
+            "obs_minus_nwp_temp": [24],
         },
     )
+
+    if "obs_minus_nwp_temp" in enriched.columns:
+        lag_features = {**lag_features, "obs_minus_nwp_temp": sorted(set(lag_features.get("obs_minus_nwp_temp", []) + [1, 3, 6, 12, 24, 48, 72]))}
+        rolling_features = {**rolling_features, "obs_minus_nwp_temp": sorted(set(rolling_features.get("obs_minus_nwp_temp", []) + [6, 24, 72]))}
+        delta_features = {**delta_features, "obs_minus_nwp_temp": sorted(set(delta_features.get("obs_minus_nwp_temp", []) + [24]))}
 
     grouped = enriched.groupby("station_id", group_keys=False)
     for column, lags in lag_features.items():
@@ -274,9 +453,26 @@ def _apply_feature_engineering(frame: pd.DataFrame, config: dict) -> pd.DataFram
 def load_or_prepare_v2_training_table(config: dict) -> pd.DataFrame:
     output_path = resolve_path(config["paths"]["output_training_table"])
     if output_path.exists():
-        return read_table(output_path)
+        cached = read_table(output_path)
+        missing_columns = _missing_configured_training_columns(cached, config)
+        if not missing_columns:
+            return cached
+        print(
+            "Cached V2/V3 training table is missing configured columns; rebuilding "
+            f"{output_path}: {missing_columns[:12]}"
+        )
     training_table, quality_report = build_v2_training_table(config)
     write_table(training_table, output_path)
     if "output_data_quality" in config["paths"]:
         write_json(quality_report, config["paths"]["output_data_quality"])
     return training_table
+
+
+def _missing_configured_training_columns(frame: pd.DataFrame, config: dict) -> list[str]:
+    data_config = config.get("data", {})
+    features = data_config.get("features", {})
+    required: set[str] = {"station_id", "datetime", "target_value", "split"}
+    for section in ("encoder_continuous", "decoder_known", "static_real", "static_categoricals"):
+        required.update(str(column) for column in features.get(section, []))
+    required.update(str(column) for column in data_config.get("scaling", {}).get("columns", []))
+    return sorted(column for column in required if column not in frame.columns)

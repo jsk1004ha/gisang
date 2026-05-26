@@ -26,6 +26,10 @@ tft = [
 lgbm = [
   "lightgbm>=4.5",
 ]
+nwp = [
+  "cfgrib>=0.9.15",
+  "eccodes>=2.44",
+]
 dev = [
   "pytest>=8.0",
 ]

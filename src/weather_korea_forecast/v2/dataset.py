@@ -8,6 +8,11 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from weather_korea_forecast.v2.scaling import SplitAwareScaler, fit_split_aware_scaler, normalize_scaling_mode
+from weather_korea_forecast.v2.future_features import build_future_feature_metadata
+from weather_korea_forecast.v2.target_transforms import (
+    normalize_target_transform_config,
+    target_transform_context_columns,
+)
 
 
 @dataclass
@@ -48,6 +53,8 @@ class DirectForecastWindowDataset(Dataset):
         decoder_columns: list[str],
         target_columns: list[str],
         static_baseline_columns: list[str],
+        target_context_columns: list[str],
+        sample_weighting_config: dict[str, Any] | None,
         encoder_length: int,
         prediction_length: int,
         split_name: str,
@@ -57,6 +64,8 @@ class DirectForecastWindowDataset(Dataset):
         self.decoder_columns = decoder_columns
         self.target_columns = target_columns
         self.static_baseline_columns = static_baseline_columns
+        self.target_context_columns = target_context_columns
+        self.sample_weighting_config = sample_weighting_config or {}
         self.encoder_length = encoder_length
         self.prediction_length = prediction_length
         self.split_name = split_name
@@ -85,6 +94,12 @@ class DirectForecastWindowDataset(Dataset):
                         else torch.zeros(0, dtype=torch.float32)
                     ),
                     "target": torch.tensor(decoder_slice[self.target_columns].to_numpy(dtype="float32")),
+                    "target_context": (
+                        torch.tensor(decoder_slice[self.target_context_columns].to_numpy(dtype="float32"))
+                        if self.target_context_columns
+                        else torch.zeros((self.prediction_length, 0), dtype=torch.float32)
+                    ),
+                    "sample_weight": torch.tensor(_sequence_sample_weight(decoder_slice, self.sample_weighting_config), dtype=torch.float32),
                     "station_id": str(station_id),
                     "region_class": str(encoder_slice.iloc[0].get("region_class", "unknown")),
                     "prediction_start": decoder_slice.iloc[0]["datetime"].isoformat(),
@@ -103,6 +118,7 @@ def build_v2_dataset_bundle(training_table: pd.DataFrame, config: dict, backend:
     frame["station_id"] = frame["station_id"].astype(str)
     frame["datetime"] = pd.to_datetime(frame["datetime"], utc=True)
     frame = frame.sort_values(["station_id", "datetime"]).reset_index(drop=True)
+    frame["target_value_raw"] = frame["target_value"].astype(float)
     if "region_class" in frame.columns:
         frame["region_class"] = frame["region_class"].fillna("unknown").astype(str)
     elif "region" in frame.columns:
@@ -119,6 +135,13 @@ def build_v2_dataset_bundle(training_table: pd.DataFrame, config: dict, backend:
     unknown_columns = [column for column in encoder_columns if column not in decoder_columns]
     target_name = str(data_config["target_name"])
     target_columns = ["target_value"]
+    target_transform = normalize_target_transform_config(data_config.get("target_transform"))
+    expected_target_context_columns = target_transform_context_columns(target_transform)
+    missing_target_context_columns = [column for column in expected_target_context_columns if column not in frame.columns]
+    if missing_target_context_columns:
+        raise ValueError(f"Missing target transform context columns: {missing_target_context_columns}")
+    target_context_columns = expected_target_context_columns
+    sample_weighting_config = dict(data_config.get("sample_weighting", {}))
     static_real_columns = [column for column in features_config.get("static_real", []) if column in frame.columns]
     static_categorical_columns = [column for column in features_config.get("static_categoricals", []) if column in frame.columns]
     encoder_length = int(data_config["window"]["encoder_length"])
@@ -147,6 +170,8 @@ def build_v2_dataset_bundle(training_table: pd.DataFrame, config: dict, backend:
 
     required_columns = sorted(
         set(encoder_columns + decoder_columns + target_columns + static_real_columns + ["station_id", "datetime", "split", "region_class"])
+        | set(target_context_columns)
+        | {"target_value_raw"}
     )
     drop_columns = [column for column in required_columns if column in frame.columns]
     before_drop = len(frame)
@@ -157,13 +182,40 @@ def build_v2_dataset_bundle(training_table: pd.DataFrame, config: dict, backend:
     test_frame = frame.loc[frame["split"] == "test"].copy()
 
     train_dataset = DirectForecastWindowDataset(
-        frame, encoder_columns, decoder_columns, target_columns, static_real_columns + static_baseline_columns, encoder_length, prediction_length, "train"
+        frame,
+        encoder_columns,
+        decoder_columns,
+        target_columns,
+        static_real_columns + static_baseline_columns,
+        target_context_columns,
+        sample_weighting_config,
+        encoder_length,
+        prediction_length,
+        "train",
     )
     val_dataset = DirectForecastWindowDataset(
-        frame, encoder_columns, decoder_columns, target_columns, static_real_columns + static_baseline_columns, encoder_length, prediction_length, "val"
+        frame,
+        encoder_columns,
+        decoder_columns,
+        target_columns,
+        static_real_columns + static_baseline_columns,
+        target_context_columns,
+        sample_weighting_config,
+        encoder_length,
+        prediction_length,
+        "val",
     )
     test_dataset = DirectForecastWindowDataset(
-        frame, encoder_columns, decoder_columns, target_columns, static_real_columns + static_baseline_columns, encoder_length, prediction_length, "test"
+        frame,
+        encoder_columns,
+        decoder_columns,
+        target_columns,
+        static_real_columns + static_baseline_columns,
+        target_context_columns,
+        sample_weighting_config,
+        encoder_length,
+        prediction_length,
+        "test",
     )
 
     metadata: dict[str, Any] = {
@@ -174,6 +226,10 @@ def build_v2_dataset_bundle(training_table: pd.DataFrame, config: dict, backend:
         "static_baseline_columns": static_baseline_columns,
         "dropped_row_count": before_drop - len(frame),
         "global_start": str(global_start),
+        "target_transform": target_transform,
+        "target_context_columns": target_context_columns,
+        "sample_weighting": sample_weighting_config,
+        "future_features": build_future_feature_metadata(config),
     }
 
     if backend == "pytorch_forecasting":
@@ -217,6 +273,31 @@ def build_v2_dataset_bundle(training_table: pd.DataFrame, config: dict, backend:
         backend=backend,
         metadata=metadata,
     )
+
+
+def _sequence_sample_weight(decoder_slice: pd.DataFrame, config: dict[str, Any]) -> float:
+    if not bool(config.get("enabled", False)):
+        return 1.0
+    mode = str(config.get("mode", "humidity_extremes")).strip().lower()
+    values = decoder_slice.get(str(config.get("source_column", "humidity")))
+    if values is None:
+        values = decoder_slice.get("target_value_raw")
+    if values is None:
+        return 1.0
+    series = pd.Series(values).astype(float)
+    if mode in {"humidity_extremes", "rh_extremes", "dry_humid"}:
+        low_threshold = float(config.get("low_threshold", 40.0))
+        high_threshold = float(config.get("high_threshold", 80.0))
+        extreme_weight = float(config.get("extreme_weight", 2.0))
+        if bool(((series < low_threshold) | (series > high_threshold)).any()):
+            return extreme_weight
+        return 1.0
+    if mode in {"distance_from_median", "continuous"}:
+        median = float(config.get("median", series.median()))
+        std = float(config.get("std", series.std(ddof=0))) or 1.0
+        alpha = float(config.get("alpha", 1.0))
+        return float(1.0 + alpha * ((series - median).abs() / std).mean())
+    raise ValueError(f"Unsupported sample_weighting mode: {mode}")
 
 
 def _build_pytorch_forecasting_datasets(

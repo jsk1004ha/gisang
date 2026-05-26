@@ -3,6 +3,9 @@ from __future__ import annotations
 from copy import deepcopy
 
 from weather_korea_forecast.models.baselines import (
+    CatBoostBaseline,
+    DecoderFeatureBaseline,
+    HorizonWiseCatBoostBaseline,
     HorizonWiseLightGBMBaseline,
     HorizonWiseRidgeRegressionBaseline,
     LightGBMBaseline,
@@ -25,6 +28,15 @@ def build_model(model_config: dict, bundle):
             target_columns=bundle.target_columns,
             seasonal_period=seasonal_period,
             target_source_features=resolved_config["model"].get("target_source_features"),
+        )
+    if model_type in {"decoder_feature", "decoder_feature_baseline", "future_feature_baseline"}:
+        target_source_features = resolved_config["model"].get("target_source_features")
+        if not target_source_features:
+            raise ValueError("decoder_feature_baseline requires model.target_source_features.")
+        return DecoderFeatureBaseline(
+            decoder_feature_names=bundle.decoder_columns,
+            target_columns=bundle.target_columns,
+            target_source_features=[str(feature) for feature in target_source_features],
         )
     if model_type == "ridge":
         return RidgeRegressionBaseline(
@@ -50,9 +62,25 @@ def build_model(model_config: dict, bundle):
             target_columns=bundle.target_columns,
             prediction_length=bundle.prediction_length,
             params=dict(resolved_config["model"].get("params", {})),
+            param_grid=dict(resolved_config["model"].get("param_grid", {})),
         )
     if model_type in {"horizon_wise_lightgbm", "horizonwise_lightgbm"}:
         return HorizonWiseLightGBMBaseline(
+            encoder_feature_names=bundle.encoder_columns,
+            target_columns=bundle.target_columns,
+            prediction_length=bundle.prediction_length,
+            params=dict(resolved_config["model"].get("params", {})),
+            param_grid=dict(resolved_config["model"].get("param_grid", {})),
+        )
+    if model_type in {"catboost", "catboost_regressor"}:
+        return CatBoostBaseline(
+            encoder_feature_names=bundle.encoder_columns,
+            target_columns=bundle.target_columns,
+            prediction_length=bundle.prediction_length,
+            params=dict(resolved_config["model"].get("params", {})),
+        )
+    if model_type in {"horizon_wise_catboost", "horizonwise_catboost"}:
+        return HorizonWiseCatBoostBaseline(
             encoder_feature_names=bundle.encoder_columns,
             target_columns=bundle.target_columns,
             prediction_length=bundle.prediction_length,

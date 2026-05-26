@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 import torch
 
-from weather_korea_forecast.models.baselines import RidgeRegressionBaseline, _ridge_alpha_selection_loss
+from weather_korea_forecast.models.baselines import (
+    DecoderFeatureBaseline,
+    LightGBMBaseline,
+    RidgeRegressionBaseline,
+    _ridge_alpha_selection_loss,
+)
 
 
 def test_ridge_regression_selects_alpha_from_validation_loss() -> None:
@@ -61,3 +70,45 @@ def test_ridge_alpha_selection_scores_bias_corrected_holdout() -> None:
     )
 
     assert loss == 0.0
+
+
+def test_decoder_feature_baseline_copies_future_known_feature() -> None:
+    batch = {
+        "encoder_cont": torch.zeros((2, 3, 1)),
+        "decoder_known": torch.tensor(
+            [
+                [[1.0, 10.0], [2.0, 20.0]],
+                [[3.0, 30.0], [4.0, 40.0]],
+            ]
+        ),
+        "static_real": torch.zeros((2, 0)),
+        "target": torch.tensor([[[10.0], [20.0]], [[30.0], [40.0]]]),
+        "station_id": ["108", "109"],
+        "prediction_start": ["2025-01-01T00:00:00Z", "2025-01-01T01:00:00Z"],
+    }
+    model = DecoderFeatureBaseline(
+        decoder_feature_names=["hour", "future_humidity"],
+        target_columns=["target_value"],
+        target_source_features=["future_humidity"],
+    )
+
+    prediction = model.predict_batch(batch)
+    result = model.fit([batch], [batch], max_epochs=1, learning_rate=0.0)
+
+    assert torch.equal(prediction, batch["target"])
+    assert result.best_val_loss == 0.0
+
+
+def test_lightgbm_load_reports_optional_dependency(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def raise_missing_lightgbm(*args, **kwargs):
+        raise ModuleNotFoundError("No module named 'lightgbm'", name="lightgbm")
+
+    monkeypatch.setattr(torch, "load", raise_missing_lightgbm)
+    bundle = SimpleNamespace(
+        encoder_columns=["x"],
+        target_columns=["target_value"],
+        prediction_length=1,
+    )
+
+    with pytest.raises(RuntimeError, match="optional 'lightgbm' dependency"):
+        LightGBMBaseline.load(tmp_path / "model.pt", bundle, {"model": {"params": {}}})

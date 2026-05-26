@@ -15,6 +15,7 @@ def add_time_features(df: pd.DataFrame, datetime_col: str = "datetime") -> pd.Da
     frame["month"] = month
     frame["dayofyear"] = dayofyear
     frame["season"] = month.map(_month_to_season)
+    frame["is_daytime"] = ((hour >= 6) & (hour < 18)).astype(int)
     frame["hour_sin"] = np.sin(2 * np.pi * hour / 24.0)
     frame["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
     frame["doy_sin"] = np.sin(2 * np.pi * dayofyear / 366.0)

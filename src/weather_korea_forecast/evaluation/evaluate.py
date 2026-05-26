@@ -33,8 +33,16 @@ def evaluate_experiment(experiment_dir: str | Path) -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a saved experiment directory.")
     parser.add_argument("--experiment-dir", required=True)
+    parser.add_argument("--update-report", dest="update_report", action="store_true", default=True, help="Regenerate reports/experiment_report.html after evaluation (default).")
+    parser.add_argument("--no-update-report", dest="update_report", action="store_false", help="Skip automatic unified report generation.")
+    parser.add_argument("--report-output-dir", default="reports")
+    parser.add_argument("--report-title", default="기상 V1-V3 실험 리포트")
     args = parser.parse_args()
     summary = evaluate_experiment(args.experiment_dir)
+    if args.update_report:
+        from weather_korea_forecast.reporting.generate_report import build_report
+
+        build_report(experiments_root=Path("data/artifacts"), output_dir=Path(args.report_output_dir), title=args.report_title)
     print(summary)
 
 
