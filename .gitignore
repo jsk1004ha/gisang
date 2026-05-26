@@ -53,3 +53,6 @@ data/interim/
 data/processed/
 
 .omx
+
+# Generated unified experiment reports
+reports/
