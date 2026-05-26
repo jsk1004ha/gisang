@@ -41,6 +41,7 @@ def test_render_report_contains_filters_badges_and_embedded_plot(tmp_path: Path)
     )
     html = render_report([record], title="Report", experiments_root=tmp_path, include_images=True)
     assert "리더보드" in html
+    assert "V3.5 / V4 Readiness Checklist" in html
     assert "백테스트" in html
     assert "data:image/png;base64" in html
     assert "versionFilter" in html
@@ -93,6 +94,7 @@ def test_render_report_separates_diagnostic_and_warns_without_operational_model(
     assert "Diagnostic / Oracle Checks" in html
     assert "실제 예측 모델 성능이나 best RMSE로 해석하지 마십시오" in html
     assert "운영 가능 모델 없음" in html
+    assert "V3.5 / V4 Readiness Checklist" in html
     assert "전체 Best RMSE" not in html
     assert "0.000" in html  # diagnostic section still displays oracle metrics.
 

@@ -63,6 +63,7 @@ def render_report(
   </header>
   {_operational_banner(main_records)}
   {kpis}
+  {_readiness_section(records, main_records)}
   <section class=\"card\">
     <h2>리더보드</h2>
     <div class=\"filters\">
@@ -226,6 +227,63 @@ def _kpi_cards(records: list[ExperimentRecord], best: dict[str, ExperimentRecord
         ("Alias artifact", str(alias_count)),
     ]
     return '<section class="kpis">' + ''.join(f'<div class="kpi"><span>{html.escape(k)}</span><b>{html.escape(v)}</b></div>' for k, v in cards) + '</section>'
+
+
+def _readiness_section(all_records: list[ExperimentRecord], main_records: list[ExperimentRecord]) -> str:
+    checks = [
+        (
+            "Diagnostic/oracle 분리",
+            "pass" if all(not r.included_in_main_leaderboard for r in all_records if r.is_diagnostic) else "fail",
+            "oracle/diagnostic row가 main leaderboard/KPI/best 산정에서 제외되어야 합니다.",
+        ),
+        (
+            "Alias artifact dedupe",
+            "pass" if all(not r.included_in_main_leaderboard for r in all_records if r.is_alias_artifact) else "fail",
+            "best/latest alias는 별도 섹션과 상세에서만 표시되어야 합니다.",
+        ),
+        (
+            "Temp NWP-assisted ≤ 1.1°C",
+            "pass" if (_best_rmse(main_records, target="temp", track="nwp_assisted_mos") or float("inf")) <= 1.1 else "fail",
+            f"현재 {_fmt(_best_rmse(main_records, target='temp', track='nwp_assisted_mos'))}; V3.5 안정화 기준입니다.",
+        ),
+        (
+            "Temp NWP-assisted ≤ 1.0°C",
+            "pass" if (_best_rmse(main_records, target="temp", track="nwp_assisted_mos") or float("inf")) <= 1.0 else "warn",
+            "목표 RMSE 1.0°C 이하. 미달이면 residual LGBM/ensemble/calibration 후보를 유지합니다.",
+        ),
+        (
+            "Operational-valid forecast source",
+            "pass" if any(r.operational_valid is True for r in main_records) else "warn",
+            "operational_valid=true 대표 모델이 있어야 V4 운영 단계로 넘어갈 수 있습니다.",
+        ),
+        (
+            "Humidity ≤ 10%p",
+            "pass" if (_best_rmse(main_records, target="humidity") or float("inf")) <= 10.0 else "warn",
+            f"현재 {_fmt(_best_rmse(main_records, target='humidity'))}; dew point/depression 및 predicted temp 연결이 필요합니다.",
+        ),
+        (
+            "Observation-only temp ≤ 2.0°C",
+            "pass" if (_best_rmse(main_records, target="temp", track="observation_only") or float("inf")) <= 2.0 else "warn",
+            f"현재 {_fmt(_best_rmse(main_records, target='temp', track='observation_only'))}; anomaly/station-wise/horizon-wise 실험이 필요합니다.",
+        ),
+    ]
+    rows = "".join(
+        f"<tr><td>{html.escape(name)}</td><td>{_readiness_badge(status)}</td><td>{html.escape(note)}</td></tr>"
+        for name, status, note in checks
+    )
+    return f"""<section class="card readiness">
+      <h2>V3.5 / V4 Readiness Checklist</h2>
+      <p class="muted">V4 진입 전 temp MOS 운영성, humidity 목표, observation-only baseline, report 신뢰도를 동시에 확인합니다.</p>
+      <table><thead><tr><th>항목</th><th>상태</th><th>근거 / 다음 작업</th></tr></thead><tbody>{rows}</tbody></table>
+    </section>"""
+
+
+def _readiness_badge(status: str) -> str:
+    if status == "pass":
+        return '<span class="badge badge-ok">PASS</span>'
+    if status == "warn":
+        return '<span class="badge badge-warn">WARN</span>'
+    return '<span class="badge badge-bad">FAIL</span>'
 
 
 def _best_records(records: list[ExperimentRecord]) -> dict[str, ExperimentRecord]:
@@ -471,7 +529,7 @@ def _fmt(value: object) -> str:
         if isinstance(value, bool):
             return str(value)
         return f"{float(value):.3f}"
-    except Exception:
+    except (TypeError, ValueError):
         return str(value)
 
 
@@ -499,7 +557,7 @@ input, select { border:1px solid var(--border); border-radius:10px; padding:8px 
 .table-wrap { max-height:640px; overflow:auto; border:1px solid var(--border); border-radius:12px; }
 table { width:100%; border-collapse:collapse; font-size:13px; } th, td { padding:9px 10px; border-bottom:1px solid #edf0f5; vertical-align:top; } th { position:sticky; top:0; background:#f1f5f9; text-align:left; z-index:1; } th[onclick] { cursor:pointer; } th[onclick]::after { content:' ↕'; color:#98a2b3; font-weight:400; } .num { text-align:right; font-variant-numeric:tabular-nums; }
 .goal-ok { color:var(--ok); font-weight:700; } .goal-warn { color:var(--warn); font-weight:700; } .goal-bad { color:var(--bad); font-weight:700; }
-.badge { display:inline-block; padding:3px 7px; border-radius:999px; margin:1px; font-size:11px; font-weight:700; } .badge-ok { color:#05603a; background:#d1fadf; } .badge-bad { color:#912018; background:#fee4e2; } .badge-muted { color:#475467; background:#eaecf0; } .badge-blue { color:#1849a9; background:#d1e9ff; } .badge-purple { color:#5925dc; background:#ebe9fe; }
+.badge { display:inline-block; padding:3px 7px; border-radius:999px; margin:1px; font-size:11px; font-weight:700; } .badge-ok { color:#05603a; background:#d1fadf; } .badge-bad { color:#912018; background:#fee4e2; } .badge-warn { color:#93370d; background:#fef0c7; } .badge-muted { color:#475467; background:#eaecf0; } .badge-blue { color:#1849a9; background:#d1e9ff; } .badge-purple { color:#5925dc; background:#ebe9fe; }
 .detail { border:1px solid var(--border); border-radius:12px; margin:10px 0; background:white; } .detail summary { cursor:pointer; padding:14px 16px; display:flex; justify-content:space-between; gap:10px; } .detail-body { padding:0 16px 16px; }
 dl { display:grid; grid-template-columns:170px 1fr; gap:7px 12px; } dt { color:var(--muted); } dd { margin:0; }
 .plots { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:14px; } .plot-card { border:1px solid #edf0f5; border-radius:12px; padding:10px; background:#fbfcfe; } .plot-card h4 { margin:0 0 8px; }

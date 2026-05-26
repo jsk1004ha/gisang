@@ -32,6 +32,9 @@ def normalize_target_transform_config(config: dict[str, Any] | None) -> dict[str
         "era5_residual": "residual_from_feature",
         "residual_feature": "residual_from_feature",
         "future_feature_residual": "residual_from_feature",
+        "anomaly": "station_month_hour_anomaly",
+        "climatology_anomaly": "station_month_hour_anomaly",
+        "station_hour_anomaly": "station_month_hour_anomaly",
     }
     raw["type"] = aliases.get(transform_type, transform_type)
     return raw
@@ -43,7 +46,7 @@ def target_transform_requires_temperature(transform_config: dict[str, Any] | Non
 
 def target_transform_context_columns(transform_config: dict[str, Any] | None) -> list[str]:
     transform = normalize_target_transform_config(transform_config)
-    if transform["type"] == "residual_from_feature":
+    if transform["type"] in {"residual_from_feature", "station_month_hour_anomaly"}:
         return [TARGET_CONTEXT_BASELINE_VALUE]
     if target_transform_requires_temperature(transform_config):
         return [TARGET_CONTEXT_TEMP_C]
@@ -108,6 +111,13 @@ def apply_target_transform(frame: pd.DataFrame, target_name: str, transform_conf
             baseline = frame[baseline_column].astype(float)
         return frame[target_name].astype(float) - baseline
 
+    if transform_type == "station_month_hour_anomaly":
+        if target_name not in frame.columns:
+            raise ValueError(f"Target column '{target_name}' is not present in the V2 training table.")
+        if TARGET_CONTEXT_BASELINE_VALUE in frame.columns:
+            return frame[target_name].astype(float) - frame[TARGET_CONTEXT_BASELINE_VALUE].astype(float)
+        return frame[target_name].astype(float)
+
     raise ValueError(f"Unsupported target transform: {transform_type}")
 
 
@@ -129,7 +139,7 @@ def inverse_target_transform_value(
         temp_c = _require_context_temperature(context, transform_type)
         dew_point_c = temp_c - float(value)
         return float(relative_humidity_from_dew_point(temp_c=np.asarray([temp_c]), dew_point_c=np.asarray([dew_point_c]))[0])
-    if transform_type == "residual_from_feature":
+    if transform_type in {"residual_from_feature", "station_month_hour_anomaly"}:
         baseline_value = _require_context_baseline_value(context, transform_type)
         return float(baseline_value + float(value))
     raise ValueError(f"Unsupported target transform: {transform_type}")

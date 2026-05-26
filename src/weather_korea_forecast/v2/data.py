@@ -14,10 +14,12 @@ from weather_korea_forecast.features.time_features import add_time_features
 from weather_korea_forecast.utils.io import read_table, write_json, write_table
 from weather_korea_forecast.utils.paths import resolve_path
 from weather_korea_forecast.v2.target_transforms import (
+    TARGET_CONTEXT_BASELINE_VALUE,
     absolute_humidity_g_m3,
     append_target_transform_context,
     apply_target_transform,
     dew_point_from_relative_humidity,
+    normalize_target_transform_config,
     saturation_vapor_pressure_hpa,
     temperature_series_to_celsius,
     vapor_pressure_hpa,
@@ -53,8 +55,9 @@ def build_v2_training_table(config: dict) -> tuple[pd.DataFrame, dict[str, objec
     merged["target_value"] = apply_target_transform(merged, target_name, data_config.get("target_transform"))
     merged["target_name"] = target_name
     merged = _fill_raw_continuous_columns(merged, config)
-    merged = _apply_feature_engineering(merged, config)
     merged = assign_time_splits(merged, data_config["split"])
+    merged = _apply_station_month_hour_anomaly_target(merged, target_name, data_config.get("target_transform"))
+    merged = _apply_feature_engineering(merged, config)
     merged = merged.sort_values(["station_id", "datetime"]).reset_index(drop=True)
     merged["quality_flag"] = merged.get("quality_flag", "").fillna("")
 
@@ -333,9 +336,12 @@ def _merge_predicted_temperature_features(frame: pd.DataFrame, config: dict) -> 
     timestamp_column = next((column for column in ("datetime", "valid_time", "timestamp") if column in predicted.columns), None)
     if timestamp_column is None:
         raise ValueError("predicted_temperature_csv requires one of datetime, valid_time, or timestamp.")
-    value_column = next((column for column in ("predicted_temp", "prediction", "temp_prediction") if column in predicted.columns), None)
+    value_column = next(
+        (column for column in ("predicted_temp_horizon", "predicted_temp", "prediction", "temp_prediction") if column in predicted.columns),
+        None,
+    )
     if value_column is None:
-        raise ValueError("predicted_temperature_csv requires one of predicted_temp, prediction, or temp_prediction.")
+        raise ValueError("predicted_temperature_csv requires one of predicted_temp_horizon, predicted_temp, prediction, or temp_prediction.")
 
     predicted = predicted.rename(columns={timestamp_column: "datetime", value_column: "predicted_temp"})
     predicted["station_id"] = predicted["station_id"].astype(str)
@@ -345,6 +351,36 @@ def _merge_predicted_temperature_features(frame: pd.DataFrame, config: dict) -> 
     grouped = merged.sort_values(["station_id", "datetime"]).groupby("station_id", group_keys=False)
     merged["predicted_temp_vs_prev_day"] = grouped["predicted_temp"].transform(lambda series: series - series.shift(24))
     return merged
+
+
+def _apply_station_month_hour_anomaly_target(
+    frame: pd.DataFrame,
+    target_name: str,
+    transform_config: dict | None,
+) -> pd.DataFrame:
+    transform = normalize_target_transform_config(transform_config)
+    if transform["type"] != "station_month_hour_anomaly":
+        return frame
+    if target_name not in frame.columns:
+        raise ValueError(f"station_month_hour_anomaly target transform requires column '{target_name}'.")
+    enriched = frame.copy()
+    group_columns = [str(column) for column in transform.get("group_columns", ["station_id", "month", "hour"])]
+    missing = [column for column in group_columns if column not in enriched.columns]
+    if missing:
+        raise ValueError(f"station_month_hour_anomaly target transform missing group columns: {missing}")
+    train = enriched.loc[enriched["split"] == "train"].copy()
+    if train.empty:
+        raise ValueError("station_month_hour_anomaly target transform requires train split rows.")
+    global_mean = float(train[target_name].astype(float).mean())
+    grouped = train.groupby(group_columns, dropna=False)[target_name].mean().rename("station_month_hour_climatology").reset_index()
+    enriched = enriched.merge(grouped, on=group_columns, how="left")
+    station_mean = train.groupby("station_id")[target_name].mean().to_dict() if "station_id" in train.columns else {}
+    if "station_id" in enriched.columns:
+        enriched["station_month_hour_climatology"] = enriched["station_month_hour_climatology"].fillna(enriched["station_id"].map(station_mean))
+    enriched["station_month_hour_climatology"] = enriched["station_month_hour_climatology"].fillna(global_mean).astype(float)
+    enriched[TARGET_CONTEXT_BASELINE_VALUE] = enriched["station_month_hour_climatology"]
+    enriched["target_value"] = enriched[target_name].astype(float) - enriched["station_month_hour_climatology"]
+    return enriched
 
 
 def _fill_raw_continuous_columns(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
@@ -358,6 +394,7 @@ def _fill_raw_continuous_columns(frame: pd.DataFrame, config: dict) -> pd.DataFr
         or column.startswith("era5_")
         or column.startswith("_target_context")
         or column in {"target_value", "coastal_distance_km"}
+        or column == "station_month_hour_climatology"
     ]
     static_numeric_columns = data_config.get("features", {}).get("static_real", [])
     numeric_columns.extend([column for column in static_numeric_columns if column in enriched.columns])

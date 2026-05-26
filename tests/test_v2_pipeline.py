@@ -333,6 +333,95 @@ def test_v2_humidity_feature_sanity_reports_time_features_and_celsius_dewpoint(s
     assert not any("appears to be Kelvin" in warning for warning in sanity["warnings"])
 
 
+def test_v2_humidity_can_merge_predicted_temp_horizon_feature(synthetic_v2_project: dict[str, object], tmp_path: Path) -> None:
+    base_config = synthetic_v2_project["humidity_tft_config"]
+    obs = pd.read_csv(base_config["paths"]["observation_csv"])
+    predicted_path = tmp_path / "predicted_temp_horizon.csv"
+    pd.DataFrame(
+        {
+            "station_id": obs["station_id"].astype(str),
+            "valid_time": obs["datetime"],
+            "predicted_temp_horizon": obs["temp"].astype(float) + 0.5,
+        }
+    ).to_csv(predicted_path, index=False)
+    config = {
+        **base_config,
+        "paths": {
+            **base_config["paths"],
+            "predicted_temperature_csv": str(predicted_path),
+            "output_training_table": str(tmp_path / "predicted_temp_horizon" / "training_table.csv"),
+            "output_data_quality": str(tmp_path / "predicted_temp_horizon" / "data_quality.json"),
+        },
+        "data": {
+            **base_config["data"],
+            "features": {
+                **base_config["data"]["features"],
+                "encoder_continuous": [
+                    *base_config["data"]["features"]["encoder_continuous"],
+                    "predicted_temp",
+                    "predicted_temp_delta",
+                    "predicted_temp_vs_prev_day",
+                ],
+            },
+            "scaling": {
+                **base_config["data"]["scaling"],
+                "columns": [
+                    *base_config["data"]["scaling"]["columns"],
+                    "predicted_temp",
+                    "predicted_temp_delta",
+                    "predicted_temp_vs_prev_day",
+                ],
+            },
+        },
+    }
+
+    training_table, _ = build_v2_training_table(config)
+
+    assert "predicted_temp" in training_table.columns
+    assert "predicted_temp_delta" in training_table.columns
+    assert training_table["predicted_temp_delta"].dropna().median() == pytest.approx(0.5)
+
+
+def test_v2_station_month_hour_anomaly_target_uses_train_climatology(
+    synthetic_v2_project: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    base_config = synthetic_v2_project["temp_ridge_config"]
+    config = {
+        **base_config,
+        "paths": {
+            **base_config["paths"],
+            "output_training_table": str(tmp_path / "anomaly" / "training_table.csv"),
+            "output_data_quality": str(tmp_path / "anomaly" / "data_quality.json"),
+        },
+        "data": {
+            **base_config["data"],
+            "target_transform": {"type": "station_month_hour_anomaly", "group_columns": ["station_id", "month", "hour"]},
+        },
+    }
+
+    training_table, _ = build_v2_training_table(config)
+    row = training_table.loc[training_table["split"] == "train"].iloc[30]
+    train_group = training_table.loc[
+        (training_table["split"] == "train")
+        & (training_table["station_id"].astype(str) == str(row["station_id"]))
+        & (training_table["month"] == row["month"])
+        & (training_table["hour"] == row["hour"])
+    ]
+    expected_climatology = train_group["temp"].astype(float).mean()
+
+    assert row["station_month_hour_climatology"] == pytest.approx(expected_climatology)
+    assert row["target_value"] == pytest.approx(row["temp"] - expected_climatology)
+    lagged = (
+        training_table.loc[
+            (training_table["station_id"].astype(str) == str(row["station_id"]))
+            & (pd.to_datetime(training_table["datetime"], utc=True) == pd.to_datetime(row["datetime"], utc=True) - pd.Timedelta(hours=24))
+        ]
+        .iloc[0]
+    )
+    assert row["target_value_lag_24"] == pytest.approx(lagged["target_value"])
+
+
 def test_v2_stationwise_and_regionwise_scaling_fit_train_groups_only(synthetic_v2_project: dict[str, object]) -> None:
     training_table, _ = build_v2_training_table(synthetic_v2_project["temp_ridge_config"])
     config = synthetic_v2_project["temp_ridge_config"]
@@ -777,6 +866,18 @@ def test_v3_temp_mos_residual_config_declares_backtest_track() -> None:
     assert metadata["future_feature_source"] == "era5_reanalysis"
     assert metadata["operational_valid"] is False
     assert metadata["backtest_only"] is True
+
+
+def test_v3_observation_only_anomaly_config_declares_stationwise_transform() -> None:
+    config = load_yaml("configs/v3/experiments/v3_temp_observation_only_anomaly_stationwise_horizonwise_ridge_168to24.yaml")
+    metadata = build_future_feature_metadata(config)
+
+    assert config["experiment"]["version"] == "v3"
+    assert config["data"]["target_transform"]["type"] == "station_month_hour_anomaly"
+    assert config["data"]["scaling"]["mode"] == "stationwise"
+    assert config["model"]["type"] == "horizon_wise_ridge"
+    assert metadata["forecast_track"] == "observation_only"
+    assert metadata["uses_future_weather_features"] is False
 
 
 def test_v3_temp_observed_oracle_config_is_marked_diagnostic_only() -> None:

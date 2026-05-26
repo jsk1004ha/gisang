@@ -197,6 +197,7 @@ def load_future_weather_features(
 def _canonical_future_weather_schema() -> list[str]:
     return [
         "station_id",
+        "forecast_init_time",
         "valid_time",
         "horizon_step",
         "nwp_t2m",
@@ -244,8 +245,14 @@ def _validate_prepared_forecast_features(
         normalized["nwp_sp"] = normalized["nwp_sp"].astype(float) / 100.0
     if "source" not in normalized.columns:
         normalized["source"] = "prepared_forecast_csv"
+    if "forecast_init_time" not in normalized.columns:
+        normalized["forecast_init_time"] = start
+    else:
+        normalized["forecast_init_time"] = pd.to_datetime(normalized["forecast_init_time"], utc=True)
     if "issue_time" not in normalized.columns:
         normalized["issue_time"] = start
+    else:
+        normalized["issue_time"] = pd.to_datetime(normalized["issue_time"], utc=True)
     return normalized
 
 

@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from weather_korea_forecast.v2.future_features import load_future_weather_features
+from weather_korea_forecast.v2.future_features import build_future_feature_metadata, load_future_weather_features
 from weather_korea_forecast.v2.predict import _validate_future_feature_inference_mode
 
 
@@ -41,6 +41,7 @@ def test_prepared_forecast_csv_adapter_validates_and_converts_units(tmp_path: Pa
     assert features.loc[0, "nwp_t2m"] == pytest.approx(8.0)
     assert features.loc[0, "nwp_sp"] == pytest.approx(1013.25)
     assert features.loc[0, "source"] == "prepared_forecast_csv"
+    assert pd.Timestamp(features.loc[0, "forecast_init_time"]) == pd.Timestamp("2024-01-01T00:00:00Z")
 
 
 def test_prepared_forecast_csv_adapter_rejects_missing_horizon(tmp_path: Path) -> None:
@@ -50,3 +51,19 @@ def test_prepared_forecast_csv_adapter_rejects_missing_horizon(tmp_path: Path) -
     ).to_csv(path, index=False)
     with pytest.raises(ValueError, match="missing forecast horizons"):
         load_future_weather_features("prepared_forecast_csv", "2024-01-01T00:00:00Z", 2, ["108"], path=path)
+
+
+def test_prepared_forecast_csv_metadata_can_be_operational_valid() -> None:
+    metadata = build_future_feature_metadata(
+        {
+            "data": {
+                "features": {"decoder_known": ["era5_t2m", "era5_sp"]},
+                "future_features": {"source": "prepared_forecast_csv", "track": "nwp_assisted_mos"},
+            }
+        }
+    )
+
+    assert metadata["uses_future_weather_features"] is True
+    assert metadata["future_feature_source"] == "prepared_forecast_csv"
+    assert metadata["operational_valid"] is True
+    assert metadata["backtest_only"] is False
