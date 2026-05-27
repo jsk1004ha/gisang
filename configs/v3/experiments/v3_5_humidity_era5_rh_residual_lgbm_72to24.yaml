@@ -1,14 +1,15 @@
 experiment:
-  name: v3_humidity_dewpoint_depression_lgbm_72to24
-  version: v3
-  notes: Humidity V3 dew-point-depression LightGBM starter config (72->24). Predicts dew-point depression and restores RH using temperature context for comparison against direct RH.
-
+  name: v3_5_humidity_era5_rh_residual_lgbm_72to24
+  version: v3.5
+  notes: 'V3.5 humidity backtest upper-bound MOS: residual model over ERA5-derived
+    RH baseline. Because current ERA5 station CSV has no real dew-point column, era5_relative_humidity
+    is derived from observed RH and must be treated as diagnostic/oracle, not operational.'
 paths:
   observation_csv: data/raw/asos/asos_multistation_v2.csv
   era5_csv: data/raw/era5/asos_multistation_v2_station.csv
   station_metadata_csv: data/raw/metadata/stations_v2.csv
-  output_training_table: data/processed/v3_humidity_dewpoint_depression_lgbm_72to24/training_table.csv
-  output_data_quality: data/processed/v3_humidity_dewpoint_depression_lgbm_72to24/data_quality.json
+  output_training_table: data/processed/v3_5_humidity_era5_rh_residual_lgbm_72to24/training_table.csv
+  output_data_quality: data/processed/v3_5_humidity_era5_rh_residual_lgbm_72to24/data_quality.json
 data:
   target_name: humidity
   timezone:
@@ -87,12 +88,40 @@ data:
     - era5_wind_dir_cos
     - precipitation_flag
     - is_daytime
+    - era5_relative_humidity
+    - nwp_relative_humidity_2m
+    - obs_minus_era5_rh
+    - obs_minus_nwp_rh
+    - obs_minus_era5_rh_lag_1
+    - obs_minus_era5_rh_lag_3
+    - obs_minus_era5_rh_lag_6
+    - obs_minus_era5_rh_lag_12
+    - obs_minus_era5_rh_lag_24
+    - obs_minus_era5_rh_lag_48
+    - obs_minus_era5_rh_lag_72
+    - obs_minus_era5_rh_roll_mean_24
+    - obs_minus_era5_rh_roll_mean_72
+    - obs_minus_era5_rh_roll_std_24
+    - obs_minus_nwp_rh_lag_24
+    - obs_minus_nwp_rh_roll_mean_24
     decoder_known:
     - hour_sin
     - hour_cos
     - doy_sin
     - doy_cos
     - is_daytime
+    - era5_relative_humidity
+    - nwp_relative_humidity_2m
+    - era5_t2m_c
+    - era5_dew_point_c
+    - era5_dew_point_depression
+    - era5_sp
+    - era5_u10
+    - era5_v10
+    - era5_tp
+    - era5_wind_speed
+    - era5_wind_dir_sin
+    - era5_wind_dir_cos
     static_real:
     - lat
     - lon
@@ -170,6 +199,22 @@ data:
       - 3
       - 6
       - 24
+      obs_minus_era5_rh:
+      - 1
+      - 3
+      - 6
+      - 12
+      - 24
+      - 48
+      - 72
+      obs_minus_nwp_rh:
+      - 1
+      - 3
+      - 6
+      - 12
+      - 24
+      - 48
+      - 72
     rolling_features:
       target_value:
       - 3
@@ -182,6 +227,14 @@ data:
       obs_temp:
       - 6
       - 24
+      obs_minus_era5_rh:
+      - 6
+      - 24
+      - 72
+      obs_minus_nwp_rh:
+      - 6
+      - 24
+      - 72
     delta_features:
       target_value:
       - 1
@@ -192,6 +245,14 @@ data:
       - 6
       - 24
       obs_temp:
+      - 1
+      - 6
+      - 24
+      obs_minus_era5_rh:
+      - 1
+      - 6
+      - 24
+      obs_minus_nwp_rh:
       - 1
       - 6
       - 24
@@ -261,24 +322,49 @@ data:
     - obs_absolute_humidity_g_m3
     - era5_t2m_c
     - era5_wind_speed
+    - era5_relative_humidity
+    - nwp_relative_humidity_2m
+    - obs_minus_era5_rh
+    - obs_minus_nwp_rh
+    - obs_minus_era5_rh_lag_1
+    - obs_minus_era5_rh_lag_3
+    - obs_minus_era5_rh_lag_6
+    - obs_minus_era5_rh_lag_12
+    - obs_minus_era5_rh_lag_24
+    - obs_minus_era5_rh_lag_48
+    - obs_minus_era5_rh_lag_72
+    - obs_minus_era5_rh_roll_mean_24
+    - obs_minus_era5_rh_roll_mean_72
+    - obs_minus_era5_rh_roll_std_24
+    - obs_minus_nwp_rh_lag_24
+    - obs_minus_nwp_rh_roll_mean_24
   postprocess:
     clip_prediction:
     - 0
     - 100
   target_transform:
-    type: dew_point_depression
-    source_column: obs_dew_point_depression
-    temperature_column: obs_temp
+    type: residual_from_feature
+    baseline_column: era5_relative_humidity
+  future_features:
+    track: nwp_assisted_mos
+    source: era5_reanalysis
+    operational_valid: false
+    oracle: true
+    note: Diagnostic upper-bound only until a real forecast dew-point/RH source replaces
+      the derived ERA5 RH baseline.
 model:
-  name: v3_humidity_dewpoint_depression_lgbm_72to24
+  name: v3_5_humidity_era5_rh_residual_lgbm_72to24
   type: lightgbm
   params:
-    n_estimators: 3
-    learning_rate: 0.08
-    num_leaves: 7
+    n_estimators: 20
+    learning_rate: 0.05
+    num_leaves: 31
+    min_child_samples: 20
     subsample: 0.9
     colsample_bytree: 0.9
+    random_state: 20260526
     n_jobs: 8
+    verbosity: -1
 training:
   batch_size: 64
   max_epochs: 1
@@ -289,8 +375,17 @@ training:
 evaluation:
   bias_correction:
     enabled: true
-    mode: per_station_horizon
-    method: mean_bias
+    mode: auto
+    method: auto
+    candidate_modes:
+    - global
+    - per_horizon
+    - per_station
+    - per_station_horizon
+    candidate_methods:
+    - mean_bias
+    - affine
+    - quantile
     calibration_fraction: 0.7
     apply_when: improves_on_holdout
     selection_metric: rmse

@@ -66,12 +66,14 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
             track = "nwp_assisted_mos"
     rmse_goal = _rmse_goal(target_name, track)
     rmse = _float(metrics.get("rmse"))
+    artifact_profile = _artifact_profile(summary, config)
     pred_path = exp_dir / "predictions_test.csv"
     if not pred_path.exists():
         warnings.append("predictions_test.csv missing")
-    for plot in PLOT_FILES:
-        if not (exp_dir / plot).exists():
-            warnings.append(f"{plot} missing")
+    if artifact_profile != "minimal":
+        for plot in PLOT_FILES:
+            if not (exp_dir / plot).exists():
+                warnings.append(f"{plot} missing")
     future_source_for_warning = str(summary.get("future_feature_source") or future.get("future_feature_source") or future.get("source") or "")
     if future_source_for_warning in {"era5_reanalysis", "era5_reanalysis_backtest"}:
         warnings.append("ERA5 reanalysis future features are backtest-only")
@@ -115,6 +117,7 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
         target_name=target_name,
         model_name=str(summary.get("model_name") or config.get("model", {}).get("name") or "unknown"),
         model_type=model_type,
+        artifact_profile=artifact_profile,
         encoder_length=_int(summary.get("encoder_length") or config.get("data", {}).get("window", {}).get("encoder_length") or config.get("window", {}).get("encoder_length")),
         prediction_length=_int(summary.get("prediction_length") or config.get("data", {}).get("window", {}).get("prediction_length") or config.get("window", {}).get("prediction_length")),
         train_start=_str(summary.get("train_start") or config.get("split", {}).get("train_start") or config.get("data", {}).get("split", {}).get("train_start")),
@@ -192,6 +195,15 @@ def _load_experiment_config(exp_dir: Path) -> dict[str, Any]:
         merged["training"] = train_config.get("training", {})
         merged["train_config"] = train_config
     return merged
+
+
+def _artifact_profile(summary: dict[str, Any], config: dict[str, Any]) -> str:
+    artifacts = config.get("artifacts", {})
+    raw = summary.get("artifact_profile") or artifacts.get("profile") or artifacts.get("artifact_profile") or "full"
+    profile = str(raw).strip().lower().replace("-", "_")
+    if profile in {"minimal", "slim", "lean", "report_only"}:
+        return "minimal"
+    return "full"
 
 
 def _target_name(summary: dict[str, Any], config: dict[str, Any]) -> str:

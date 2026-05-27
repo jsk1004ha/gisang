@@ -3,6 +3,8 @@
 ## 2026-05-14
 
 ### Added
+- Added `artifacts.profile: minimal` for V3.5/V4-style runs that should keep only report-critical CSV/JSON artifacts while relying on unified CSV/HTML reports instead of per-run plot bundles.
+- Added the V3.5 diagnostic humidity ERA5-RH residual LightGBM config, `configs/v3/experiments/v3_5_humidity_era5_rh_residual_lgbm_72to24.yaml`, marked backtest-only/non-operational because the current local ERA5 station CSV lacks real dew-point/RH forecast inputs.
 - Added diagnostic-aware unified reporting: oracle/decoder-feature sanity checks are separated from main KPI/best rankings, `best`/`latest` aliases are excluded from representative leaderboards, `included_in_main_leaderboard` records the exact main-row decision, target/track-specific best cards replace mixed-unit overall best RMSE, and HTML image embedding now supports `full`, `thumbnail`, and `external-assets` modes.
 - Added humidity feature sanity reporting for dew-point Celsius ranges and required `hour_sin/hour_cos/doy_sin/doy_cos` covariates.
 - Added an issue-time-aligned V3 humidity NWP-MOS runner (`weather_korea_forecast.v3.nwp_mos`) plus `configs/v3/experiments/v3_humidity_nwp_mos_lgbm_72to24.yaml` for honest residual learning from forecast RH/dew-point archives.

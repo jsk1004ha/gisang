@@ -25,6 +25,7 @@ class ExperimentRecord:
     target_name: str = "unknown"
     model_name: str = "unknown"
     model_type: str = "unknown"
+    artifact_profile: str = "full"
     encoder_length: int | None = None
     prediction_length: int | None = None
     train_start: str | None = None

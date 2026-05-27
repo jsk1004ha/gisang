@@ -141,6 +141,13 @@ observations
 - `leaderboard_<target_name>.csv`
 - `leaderboard_<forecast_track>.csv`
 
+For V3.5/V4 runs that should stay lightweight and be consumed primarily through
+`reports/experiment_summary.csv` plus `reports/experiment_report.html`, set
+`artifacts.profile: minimal`.  The evaluator then writes only report-critical
+CSV/JSON artifacts and skips plot/worst-case/rolling-origin detail files; the
+report collector records `artifact_profile=minimal` and suppresses missing-plot
+warnings for those runs.
+
 NWP-assisted / MOS configs must set `data.future_features.source`. ERA5 reanalysis sources are treated as backtest upper-bound experiments (`operational_valid: false`) unless replaced by forecast NWP inputs. Temperature residual MOS configs can use `data.target_transform.type: residual_from_feature` with `baseline_column: era5_t2m_c` so the learner predicts station-level correction residuals rather than absolute temperature directly.
 
 `decoder_feature_baseline` is available for forecast-model baselines and explicit oracle/backtest ceiling checks: it copies configured `model.target_source_features` from decoder-known covariates into the target. Any config that uses observed-target-derived future decoder features must remain marked `operational_valid: false` and documented as non-canonical.

@@ -139,3 +139,17 @@ def test_alias_artifacts_are_not_main_representatives(tmp_path: Path) -> None:
     assert by_dir["latest"].included_in_main_leaderboard is False
     main = main_leaderboard_records(records)
     assert [Path(record.artifact_dir).name for record in main] == ["v3_temp_mos_20260101T000000Z"]
+
+
+def test_minimal_artifact_profile_does_not_warn_for_missing_plots(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    exp = _write_experiment(root, "v3_5_humidity_minimal", target="humidity", track="nwp_assisted_mos", rmse=4.9, backtest=True)
+    summary = json.loads((exp / "experiment_summary.json").read_text())
+    summary["version"] = "v3.5"
+    summary["artifact_profile"] = "minimal"
+    (exp / "experiment_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+    record = collect_all(root)[0]
+
+    assert record.artifact_profile == "minimal"
+    assert not any("png missing" in warning for warning in record.warnings)

@@ -94,7 +94,7 @@ def train_v2_experiment(config: dict) -> Path:
     raw_metrics = None
     if "prediction_raw" in test_frame.columns:
         raw_metrics = compute_prediction_metrics(test_frame.rename(columns={"prediction_raw": "_prediction_raw"}), predicted_column="_prediction_raw")
-    summary = evaluate_prediction_frame(test_frame, experiment_dir)
+    summary = evaluate_prediction_frame(test_frame, experiment_dir, artifact_config=config.get("artifacts", {}))
 
     feature_importance = export_feature_importance(model, bundle)
     write_feature_importance(experiment_dir, feature_importance)

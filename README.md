@@ -807,6 +807,23 @@ CSV/JSON에는 `included_in_main_leaderboard` 컬럼이 함께 저장되며, HTM
 leaderboard와 chart는 이 값이 true인 대표 non-diagnostic run만 사용한다.
 이미지는 `--embed-images full|thumbnail|external-assets`로 제어할 수 있으며,
 기본값은 standalone HTML을 위한 `full` base64 embed다.
+가벼운 공유/검토용 리포트는 `--no-images`로 생성해 CSV와 HTML 중심으로 묶는다.
+
+V3.5 이후 실험에서도 파일 수를 최소화하려면 config에 다음을 둔다.
+
+```yaml
+artifacts:
+  root_dir: data/artifacts/v3_experiments
+  leaderboard_path: data/artifacts/v3_experiments/leaderboard.csv
+  profile: minimal
+```
+
+`artifacts.profile: minimal`은 report/leaderboard에 필요한 핵심 CSV/JSON
+(`predictions_test.csv`, `metrics_summary.json`, target/horizon/station metrics,
+`experiment_summary.json`, `leaderboard*.csv`)을 유지하고 plot, worst-case sample,
+rolling-origin 상세 등 무거운 보조 산출물 생성을 생략한다. HTML collector는 이
+profile을 인식해 missing plot 경고를 내지 않는다. V4 config도 같은 profile 키를
+계속 사용한다.
 
 학습/평가 CLI는 기본적으로 이 통합 CSV/HTML 리포트를 자동 갱신한다. 빠른
 실험이나 CI에서 리포트 생성을 건너뛰고 싶을 때만 `--no-update-report`를 사용한다.

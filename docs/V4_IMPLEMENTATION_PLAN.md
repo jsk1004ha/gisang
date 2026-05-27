@@ -175,4 +175,4 @@ forecast NWP download/archive
 -> leaderboard/report refresh
 ```
 
-All artifacts should continue to feed the unified reporting system, with diagnostic/oracle rows excluded from main rankings.
+All artifacts should continue to feed the unified reporting system, with diagnostic/oracle rows excluded from main rankings.  V4 experiment configs should keep using `artifacts.profile: minimal` by default for routine training/evaluation runs so the durable review surface is the unified CSV/HTML bundle rather than many per-run PNG/detail files.  Use the full artifact profile only for targeted debugging or publication-quality visual diagnostics.

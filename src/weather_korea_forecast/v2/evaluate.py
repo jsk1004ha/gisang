@@ -16,8 +16,13 @@ from weather_korea_forecast.utils.io import read_table, write_json, write_table
 from weather_korea_forecast.utils.paths import resolve_path
 
 
-def evaluate_prediction_frame(predictions: pd.DataFrame, experiment_dir: str | Path) -> dict[str, object]:
+def evaluate_prediction_frame(
+    predictions: pd.DataFrame,
+    experiment_dir: str | Path,
+    artifact_config: dict[str, object] | None = None,
+) -> dict[str, object]:
     experiment_path = resolve_path(experiment_dir)
+    artifact_profile = _artifact_profile(artifact_config)
     metrics = compute_prediction_metrics(predictions)
     raw_metrics = None
     if "prediction_raw" in predictions.columns:
@@ -29,37 +34,64 @@ def evaluate_prediction_frame(predictions: pd.DataFrame, experiment_dir: str | P
     metrics_payload = {"metrics": metrics, "raw_metrics": raw_metrics, "humidity_metrics": humidity_metrics}
     write_json(metrics_payload, experiment_path / "metrics_test.json")
     write_json(metrics, experiment_path / "metrics_summary.json")
-    if humidity_metrics:
+    if humidity_metrics and _write_optional_artifact(artifact_profile, "humidity_extremes"):
         write_table(pd.DataFrame([humidity_metrics]), experiment_path / "metrics_humidity_extremes.csv")
 
     for name, report in build_v2_breakdown_reports(predictions).items():
-        write_table(report, experiment_path / f"metrics_{name}.csv")
+        if _write_breakdown_artifact(artifact_profile, name):
+            write_table(report, experiment_path / f"metrics_{name}.csv")
     for name, report in build_v2_raw_breakdown_reports(predictions).items():
-        write_table(report, experiment_path / f"metrics_raw_{name}.csv")
+        if _write_breakdown_artifact(artifact_profile, name):
+            write_table(report, experiment_path / f"metrics_raw_{name}.csv")
 
-    worst_cases = predictions.assign(abs_error=lambda df: (df["prediction"] - df["actual"]).abs()).sort_values("abs_error", ascending=False).head(100)
-    write_table(worst_cases, experiment_path / "worst_case_samples.csv")
-    write_json(build_worst_case_summary(predictions), experiment_path / "worst_case_summary.json")
+    if _write_optional_artifact(artifact_profile, "worst_cases"):
+        worst_cases = predictions.assign(abs_error=lambda df: (df["prediction"] - df["actual"]).abs()).sort_values("abs_error", ascending=False).head(100)
+        write_table(worst_cases, experiment_path / "worst_case_samples.csv")
+        write_json(build_worst_case_summary(predictions), experiment_path / "worst_case_summary.json")
     for name, report in daily_reports.items():
-        write_table(report, experiment_path / f"{name}.csv")
-    plot_forecast_vs_actual(predictions, experiment_path / "forecast_vs_actual.png")
-    plot_horizon_error(predictions, experiment_path / "horizon_error.png")
-    plot_prediction_scatter(predictions, experiment_path / "prediction_scatter.png")
-    plot_raw_vs_corrected(predictions, experiment_path / "raw_vs_corrected.png")
-    plot_horizon_station_heatmap(predictions, experiment_path / "horizon_station_heatmap.png")
-    plot_group_rmse_bar(predictions, "station_id", experiment_path / "station_rmse_bar.png", title="Station RMSE")
-    plot_group_rmse_bar(predictions, "region", experiment_path / "region_rmse_bar.png", title="Region RMSE")
-    plot_daily_max_min_error(daily_reports.get("daily_target_errors", pd.DataFrame()), experiment_path / "daily_max_min_error.png")
-    plot_daily_diurnal_range_error(daily_reports.get("daily_target_errors", pd.DataFrame()), experiment_path / "daily_diurnal_range_error.png")
-    plot_extreme_target_scatter(predictions, experiment_path / "extreme_target_scatter.png")
-    plot_worst_station_timeseries(predictions, experiment_path / "worst_station_timeseries.png")
-    plot_worst_horizon_samples(predictions, experiment_path / "worst_horizon_samples.png")
-    plot_residual_scatter(predictions, experiment_path / "residual_scatter.png")
-    plot_baseline_vs_final_scatter(predictions, experiment_path / "baseline_vs_final_scatter.png")
+        if _write_optional_artifact(artifact_profile, "daily_reports"):
+            write_table(report, experiment_path / f"{name}.csv")
+    if _write_optional_artifact(artifact_profile, "plots"):
+        plot_forecast_vs_actual(predictions, experiment_path / "forecast_vs_actual.png")
+        plot_horizon_error(predictions, experiment_path / "horizon_error.png")
+        plot_prediction_scatter(predictions, experiment_path / "prediction_scatter.png")
+        plot_raw_vs_corrected(predictions, experiment_path / "raw_vs_corrected.png")
+        plot_horizon_station_heatmap(predictions, experiment_path / "horizon_station_heatmap.png")
+        plot_group_rmse_bar(predictions, "station_id", experiment_path / "station_rmse_bar.png", title="Station RMSE")
+        plot_group_rmse_bar(predictions, "region", experiment_path / "region_rmse_bar.png", title="Region RMSE")
+        plot_daily_max_min_error(daily_reports.get("daily_target_errors", pd.DataFrame()), experiment_path / "daily_max_min_error.png")
+        plot_daily_diurnal_range_error(daily_reports.get("daily_target_errors", pd.DataFrame()), experiment_path / "daily_diurnal_range_error.png")
+        plot_extreme_target_scatter(predictions, experiment_path / "extreme_target_scatter.png")
+        plot_worst_station_timeseries(predictions, experiment_path / "worst_station_timeseries.png")
+        plot_worst_horizon_samples(predictions, experiment_path / "worst_horizon_samples.png")
+        plot_residual_scatter(predictions, experiment_path / "residual_scatter.png")
+        plot_baseline_vs_final_scatter(predictions, experiment_path / "baseline_vs_final_scatter.png")
     rolling_origin = build_rolling_origin_reports(predictions)
     for name, report in rolling_origin.items():
-        write_table(report, experiment_path / f"metrics_{name}.csv")
+        if _write_optional_artifact(artifact_profile, "rolling_origin"):
+            write_table(report, experiment_path / f"metrics_{name}.csv")
     return {"metrics": metrics, "raw_metrics": raw_metrics}
+
+
+def _artifact_profile(config: dict[str, object] | None) -> str:
+    if not config:
+        return "full"
+    profile = str(config.get("profile") or config.get("artifact_profile") or "full").strip().lower().replace("-", "_")
+    if profile in {"minimal", "slim", "lean", "report_only"}:
+        return "minimal"
+    return "full"
+
+
+def _write_optional_artifact(profile: str, artifact: str) -> bool:
+    if profile != "minimal":
+        return True
+    return artifact in {"daily_reports"}
+
+
+def _write_breakdown_artifact(profile: str, name: str) -> bool:
+    if profile != "minimal":
+        return True
+    return name in {"target_name", "target_name_horizon_step", "target_name_station_id"}
 
 
 def evaluate_experiment(experiment_dir: str | Path) -> dict[str, object]:

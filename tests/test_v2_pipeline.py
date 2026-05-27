@@ -15,7 +15,7 @@ from weather_korea_forecast.v2.evaluate import evaluate_experiment, evaluate_pre
 from weather_korea_forecast.v2.future_features import build_future_feature_metadata, load_future_weather_table
 from weather_korea_forecast.v2.predict import _build_forecast_decoder_frame, generate_v2_forecast
 from weather_korea_forecast.v2.train import apply_postprocessing, compute_bias_correction, train_v2_experiment
-from weather_korea_forecast.v2.target_transforms import logit_relative_humidity
+from weather_korea_forecast.v2.target_transforms import logit_relative_humidity, relative_humidity_from_dew_point
 
 
 @pytest.fixture()
@@ -291,6 +291,12 @@ def test_v2_era5_dew_point_kelvin_conversion_and_sanity(synthetic_v2_project: di
         training_table["era5_dew_point_depression"]
         - (training_table["era5_t2m_c"] - training_table["era5_dew_point_c"])
     ).abs().max() == pytest.approx(0.0)
+    expected_era5_rh = relative_humidity_from_dew_point(
+        training_table["era5_t2m_c"],
+        training_table["era5_dew_point_c"],
+    )
+    assert np.nanmax(np.abs(training_table["era5_relative_humidity"] - expected_era5_rh)) == pytest.approx(0.0)
+    assert np.nanmax(np.abs(training_table["nwp_relative_humidity_2m"] - expected_era5_rh)) == pytest.approx(0.0)
     assert quality_report["era5_feature_sanity"]["era5_dew_point_c"]["mean"] < 40.0
 
 
@@ -1043,6 +1049,45 @@ def test_v2_evaluation_uses_target_named_daily_reports_and_humidity_metrics(tmp_
     assert set(daily_metrics["metric"]) == {"daily_max_rh_error", "daily_min_rh_error", "daily_rh_range_error"}
     assert humidity_metrics.loc[0, "dry_event_hit_rate"] == pytest.approx(0.5)
     assert humidity_metrics.loc[0, "humid_event_hit_rate"] == pytest.approx(0.5)
+
+
+def test_v2_minimal_artifact_profile_keeps_report_csvs_without_plots(tmp_path: Path) -> None:
+    predictions = pd.DataFrame(
+        [
+            {
+                "station_id": "108",
+                "prediction_start": "2024-01-01T00:00:00Z",
+                "valid_time": "2024-01-01T01:00:00Z",
+                "horizon_step": 1,
+                "target_name": "humidity",
+                "prediction": 45.0,
+                "actual": 43.0,
+                "region": "capital",
+                "season": "winter",
+            },
+            {
+                "station_id": "108",
+                "prediction_start": "2024-01-01T00:00:00Z",
+                "valid_time": "2024-01-01T02:00:00Z",
+                "horizon_step": 2,
+                "target_name": "humidity",
+                "prediction": 50.0,
+                "actual": 52.0,
+                "region": "capital",
+                "season": "winter",
+            },
+        ]
+    )
+
+    evaluate_prediction_frame(predictions, tmp_path, artifact_config={"profile": "minimal"})
+
+    assert (tmp_path / "metrics_summary.json").exists()
+    assert (tmp_path / "metrics_target_name.csv").exists()
+    assert (tmp_path / "metrics_target_name_horizon_step.csv").exists()
+    assert (tmp_path / "metrics_target_name_station_id.csv").exists()
+    assert (tmp_path / "daily_target_errors.csv").exists()
+    assert not (tmp_path / "forecast_vs_actual.png").exists()
+    assert not (tmp_path / "worst_case_samples.csv").exists()
 
 
 def test_v2_residual_framework_saves_component_predictions(synthetic_v2_project: dict[str, object]) -> None:

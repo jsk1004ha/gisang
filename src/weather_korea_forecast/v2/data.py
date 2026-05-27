@@ -20,6 +20,7 @@ from weather_korea_forecast.v2.target_transforms import (
     apply_target_transform,
     dew_point_from_relative_humidity,
     normalize_target_transform_config,
+    relative_humidity_from_dew_point,
     saturation_vapor_pressure_hpa,
     temperature_series_to_celsius,
     vapor_pressure_hpa,
@@ -284,10 +285,16 @@ def _add_physical_features(frame: pd.DataFrame) -> pd.DataFrame:
         enriched["era5_dew_point_c"] = dew_point_from_relative_humidity(era5_temp_c, humidity)
     if era5_temp_c is not None and "era5_dew_point_c" in enriched.columns:
         enriched["era5_dew_point_depression"] = era5_temp_c.astype(float) - enriched["era5_dew_point_c"].astype(float)
+        enriched["era5_relative_humidity"] = relative_humidity_from_dew_point(
+            temp_c=era5_temp_c.astype(float),
+            dew_point_c=enriched["era5_dew_point_c"].astype(float),
+        )
     if era5_temp_c is not None:
         enriched["nwp_temp_c"] = era5_temp_c.astype(float)
         # Generic V3 MOS aliases let the same residual/bias features work with
         # ERA5 backtests today and forecast NWP adapters later.
+        if "era5_relative_humidity" in enriched.columns and "nwp_relative_humidity_2m" not in enriched.columns:
+            enriched["nwp_relative_humidity_2m"] = enriched["era5_relative_humidity"]
         if "era5_sp" in enriched.columns and "nwp_sp" not in enriched.columns:
             enriched["nwp_sp"] = enriched["era5_sp"]
         if "era5_u10" in enriched.columns and "nwp_u10" not in enriched.columns:
@@ -299,6 +306,9 @@ def _add_physical_features(frame: pd.DataFrame) -> pd.DataFrame:
     if era5_temp_c is not None and "temp" in enriched.columns:
         enriched["obs_minus_era5_temp"] = enriched["temp"].astype(float) - era5_temp_c.astype(float)
         enriched["obs_minus_nwp_temp"] = enriched["temp"].astype(float) - enriched["nwp_temp_c"].astype(float)
+    if "era5_relative_humidity" in enriched.columns and "humidity" in enriched.columns:
+        enriched["obs_minus_era5_rh"] = enriched["humidity"].astype(float) - enriched["era5_relative_humidity"].astype(float)
+        enriched["obs_minus_nwp_rh"] = enriched["humidity"].astype(float) - enriched["nwp_relative_humidity_2m"].astype(float)
     if {"era5_u10", "era5_v10"}.issubset(enriched.columns):
         u10 = enriched["era5_u10"].astype(float)
         v10 = enriched["era5_v10"].astype(float)

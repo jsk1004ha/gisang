@@ -46,6 +46,7 @@ def write_experiment_summary(
         "model_name": config["model"]["name"],
         "model_type": config["model"]["type"],
         "model_family": _model_family(config["model"]["type"]),
+        "artifact_profile": _artifact_profile(config),
         "encoder_length": data_config["window"]["encoder_length"],
         "prediction_length": data_config["window"]["prediction_length"],
         "train_start": _to_min_datetime(data_config["split"]),
@@ -96,6 +97,7 @@ def update_leaderboard(experiment_dir: Path, config: dict, metrics: dict[str, ob
         "model_name": config["model"]["name"],
         "model_type": config["model"]["type"],
         "model_family": _model_family(config["model"]["type"]),
+        "artifact_profile": _artifact_profile(config),
         "encoder_length": config["data"]["window"]["encoder_length"],
         "prediction_length": config["data"]["window"]["prediction_length"],
         "scaling_mode": scaling_mode,
@@ -419,6 +421,14 @@ def _model_family(model_type: object) -> str:
     if "decoder_feature" in normalized or "future_feature" in normalized:
         return "decoder_feature"
     return normalized or "unknown"
+
+
+def _artifact_profile(config: dict) -> str:
+    artifacts = config.get("artifacts", {})
+    profile = str(artifacts.get("profile") or artifacts.get("artifact_profile") or "full").strip().lower().replace("-", "_")
+    if profile in {"minimal", "slim", "lean", "report_only"}:
+        return "minimal"
+    return "full"
 
 
 def _write_v3_umbrella_leaderboards(leaderboard: pd.DataFrame, leaderboard_path: Path) -> None:

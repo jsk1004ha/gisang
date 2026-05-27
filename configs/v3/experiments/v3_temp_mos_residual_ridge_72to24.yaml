@@ -336,3 +336,4 @@ evaluation:
 artifacts:
   root_dir: data/artifacts/v3_experiments
   leaderboard_path: data/artifacts/v3_experiments/leaderboard.csv
+  profile: minimal
