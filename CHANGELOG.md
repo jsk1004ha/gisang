@@ -134,3 +134,11 @@
 ### Verified
 - `PYTHONPATH=src .venv312/Scripts/python.exe -m compileall -q src tests`
 - `PYTHONPATH=src .venv312/Scripts/python.exe -m pytest -q` after the reporting/V3 guard additions.
+
+## G021 - Forecast Web Service MVP foundation
+
+- Added production forecast artifact exporter and schema documentation.
+- Added rule-based weather code and forecast confidence helpers.
+- Added forecast API helpers with FastAPI-compatible app creation and no-dependency test fallback.
+- Added static web MVP skeleton with operational warning banner.
+- Documented real NWP archive requirements and site deployment plan.

@@ -185,8 +185,402 @@ def test_render_report_contains_v4_schema_and_patch_badges(tmp_path: Path) -> No
 
     assert "V4 forecast schema validation" in html
     assert "V4 patch feature readiness" in html
+    assert "V4 Validation Sprint" in html
+    assert "V4-C Gate" in html
+    assert "V4-C gate status" in html
+    assert "Operational temp RMSE ≤ 1.5°C" in html
+    assert "Patch ablation completed" in html
     assert "schema v4-prepared-forecast-v1" in html
     assert "patch 5x5 summary_v1" in html
     assert "stageFilter" in html
     assert "schemaFilter" in html
     assert "patchFilter" in html
+
+
+def test_v4_patch_ablation_table_uses_main_records_only(tmp_path: Path) -> None:
+    real_exp = tmp_path / "real"
+    smoke_exp = tmp_path / "smoke"
+    real_exp.mkdir()
+    smoke_exp.mkdir()
+    real = ExperimentRecord(
+        experiment_name="v4_temp_patch_real",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="lightgbm",
+        rmse=1.2,
+        mae=0.8,
+        bias=0.0,
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        v4_stage="v4_patch_feature_candidate",
+        uses_patch_features=True,
+        patch_features_enabled=True,
+        patch_size=5,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(real_exp),
+    )
+    smoke = ExperimentRecord(
+        experiment_name="v4_temp_patch_synthetic_smoke",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="lightgbm",
+        rmse=0.01,
+        mae=0.01,
+        bias=0.0,
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        v4_stage="v4_patch_feature_candidate",
+        uses_patch_features=True,
+        patch_features_enabled=True,
+        patch_size=5,
+        is_diagnostic=True,
+        included_in_main_leaderboard=False,
+        artifact_dir=str(smoke_exp),
+    )
+
+    html = render_report([real, smoke], title="Report", experiments_root=tmp_path, include_images=False)
+    v4_section = html.split("V4 Validation Sprint", 1)[1].split("</section>", 1)[0]
+
+    assert "v4_temp_patch_real" in v4_section
+    assert "v4_temp_patch_synthetic_smoke" not in v4_section
+
+
+def test_v4_c_gate_does_not_pass_from_diagnostic_smoke(tmp_path: Path) -> None:
+    smoke_exp = tmp_path / "smoke"
+    smoke_exp.mkdir()
+    smoke = ExperimentRecord(
+        experiment_name="v4_temp_operational_synthetic_smoke",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="ridge",
+        rmse=0.01,
+        mae=0.01,
+        bias=0.0,
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        v4_stage="v4_operational_candidate",
+        forecast_schema_valid=True,
+        is_diagnostic=True,
+        included_in_main_leaderboard=False,
+        artifact_dir=str(smoke_exp),
+    )
+
+    html = render_report([smoke], title="Report", experiments_root=tmp_path, include_images=False)
+    gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+
+    assert "FAIL" in gate_section
+    assert "trusted prepared forecast operational temp model exists" in gate_section
+    assert "v4_temp_operational_synthetic_smoke" not in gate_section
+
+
+def test_v4_c_gate_rejects_generic_synthetic_operational_claim(tmp_path: Path) -> None:
+    synthetic_exp = tmp_path / "generated_operational"
+    synthetic_exp.mkdir()
+    synthetic = ExperimentRecord(
+        experiment_name="v4_temp_operational_generated_candidate",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="ridge",
+        rmse=0.5,
+        mae=0.4,
+        bias=0.0,
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        v4_stage="v4_operational_candidate",
+        forecast_schema_valid=True,
+        forecast_source_schema_valid=True,
+        forecast_source_path="data/artifacts/fixtures/generated_prepared_forecast.csv",
+        artifact_profile="full",
+        is_diagnostic=False,
+        is_representative_run=True,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(synthetic_exp),
+    )
+
+    html = render_report([synthetic], title="Report", experiments_root=tmp_path, include_images=False)
+    gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+
+    assert "FAIL" in gate_section
+    assert "trusted prepared forecast operational temp model exists" in gate_section
+    assert "v4_temp_operational_generated_candidate" not in gate_section
+
+
+def test_v4_c_gate_passes_only_with_trusted_prepared_forecast_and_patch(tmp_path: Path) -> None:
+    base_exp = tmp_path / "real_base"
+    patch_exp = tmp_path / "real_patch"
+    base_exp.mkdir()
+    patch_exp.mkdir()
+    base = ExperimentRecord(
+        experiment_name="v4_temp_mos_residual_ridge_prepared_nwp_72to24",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="ridge",
+        rmse=1.3,
+        mae=1.0,
+        bias=0.0,
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        v4_stage="v4_operational_candidate",
+        forecast_schema_valid=True,
+        forecast_source_schema_valid=True,
+        forecast_archive_adequate=True,
+        forecast_source_path="data/raw/nwp/prepared_forecast.csv",
+        artifact_profile="full",
+        is_diagnostic=False,
+        is_representative_run=True,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(base_exp),
+    )
+    patch = ExperimentRecord(
+        experiment_name="v4_temp_patch3_residual_lgbm_72to24",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="lightgbm",
+        rmse=1.2,
+        mae=0.9,
+        bias=0.0,
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        v4_stage="v4_patch_feature_candidate",
+        forecast_schema_valid=True,
+        forecast_source_schema_valid=True,
+        forecast_archive_adequate=True,
+        forecast_source_path="data/raw/nwp/prepared_forecast.csv",
+        artifact_profile="full",
+        uses_patch_features=True,
+        patch_size=3,
+        patch_improvement_rmse=0.1,
+        is_diagnostic=False,
+        is_representative_run=True,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(patch_exp),
+    )
+
+    html = render_report([base, patch], title="Report", experiments_root=tmp_path, include_images=False)
+    gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+
+    assert "PASS" in gate_section
+    assert "v4_temp_patch3_residual_lgbm_72to24" in gate_section
+    assert "missing required conditions</dt><dd>none" in gate_section
+
+
+def test_v4_c_gate_rejects_mislabeled_era5_backtest_operational_claim(tmp_path: Path) -> None:
+    backtest_exp = tmp_path / "era5_backtest"
+    patch_exp = tmp_path / "era5_patch"
+    backtest_exp.mkdir()
+    patch_exp.mkdir()
+    backtest = ExperimentRecord(
+        experiment_name="v4_temp_era5_backtest_mislabeled_operational",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="ridge",
+        rmse=0.8,
+        mae=0.6,
+        bias=0.0,
+        future_feature_source="era5_reanalysis",
+        operational_valid=True,
+        backtest_only=True,
+        v4_stage="v4_operational_candidate",
+        forecast_schema_valid=True,
+        forecast_source_schema_valid=True,
+        forecast_source_path="data/raw/era5/backtest.csv",
+        is_diagnostic=False,
+        is_representative_run=True,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(backtest_exp),
+    )
+    patch = ExperimentRecord(
+        experiment_name="v4_temp_patch_backtest_mislabeled_operational",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="lightgbm",
+        rmse=0.7,
+        mae=0.5,
+        bias=0.0,
+        future_feature_source="era5_reanalysis",
+        operational_valid=True,
+        backtest_only=True,
+        v4_stage="v4_patch_feature_candidate",
+        forecast_schema_valid=True,
+        forecast_source_schema_valid=True,
+        forecast_source_path="data/raw/era5/backtest_patch.csv",
+        uses_patch_features=True,
+        patch_size=3,
+        patch_improvement_rmse=0.1,
+        is_diagnostic=False,
+        is_representative_run=True,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(patch_exp),
+    )
+
+    html = render_report([backtest, patch], title="Report", experiments_root=tmp_path, include_images=False)
+    gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+
+    assert "FAIL" in gate_section
+    assert "trusted prepared forecast operational temp model exists" in gate_section
+    assert "v4_temp_era5_backtest_mislabeled_operational" not in gate_section
+    assert "v4_temp_patch_backtest_mislabeled_operational" not in gate_section
+
+
+def test_v4_c_gate_rejects_fixture_artifact_profile_direct_record(tmp_path: Path) -> None:
+    fixture_exp = tmp_path / "clean_fixture_profile"
+    fixture_exp.mkdir()
+    record = ExperimentRecord(
+        experiment_name="v4_temp_clean_named_operational_candidate",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="ridge",
+        rmse=1.0,
+        mae=0.8,
+        bias=0.0,
+        artifact_profile="fixture",
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        forecast_schema_valid=True,
+        forecast_source_schema_valid=True,
+        forecast_source_path="data/raw/nwp/prepared_forecast.csv",
+        uses_patch_features=True,
+        patch_size=3,
+        patch_improvement_rmse=0.1,
+        is_diagnostic=False,
+        is_representative_run=True,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(fixture_exp),
+    )
+
+    html = render_report([record], title="Report", experiments_root=tmp_path, include_images=False)
+    gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+
+    assert "FAIL" in gate_section
+    assert "v4_temp_clean_named_operational_candidate" not in gate_section
+
+
+def test_v4_c_gate_rejects_contradictory_invalid_source_schema(tmp_path: Path) -> None:
+    base_exp = tmp_path / "contradictory_schema_base"
+    patch_exp = tmp_path / "contradictory_schema_patch"
+    base_exp.mkdir()
+    patch_exp.mkdir()
+    base = ExperimentRecord(
+        experiment_name="v4_temp_prepared_contradictory_schema",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="ridge",
+        rmse=1.0,
+        mae=0.8,
+        bias=0.0,
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        forecast_schema_valid=True,
+        forecast_source_schema_valid=False,
+        forecast_source_path="data/raw/nwp/prepared_forecast.csv",
+        is_diagnostic=False,
+        is_representative_run=True,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(base_exp),
+    )
+    patch = ExperimentRecord(
+        experiment_name="v4_temp_patch_contradictory_schema",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="lightgbm",
+        rmse=0.9,
+        mae=0.7,
+        bias=0.0,
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        forecast_schema_valid=True,
+        forecast_source_schema_valid=False,
+        forecast_source_path="data/raw/nwp/prepared_forecast.csv",
+        uses_patch_features=True,
+        patch_size=3,
+        patch_improvement_rmse=0.1,
+        is_diagnostic=False,
+        is_representative_run=True,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(patch_exp),
+    )
+
+    html = render_report([base, patch], title="Report", experiments_root=tmp_path, include_images=False)
+    gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+
+    assert "FAIL" in gate_section
+    assert "v4_temp_prepared_contradictory_schema" not in gate_section
+    assert "v4_temp_patch_contradictory_schema" not in gate_section
+
+
+def test_v4_c_gate_rejects_smoke_and_compound_artifact_profiles(tmp_path: Path) -> None:
+    blocked_profiles = ["smoke", "generated_full", "diagnostic_full", "oracle_full", "synthetic_fixture"]
+    for profile in blocked_profiles:
+        exp = tmp_path / profile
+        exp.mkdir()
+        record = ExperimentRecord(
+            experiment_name=f"v4_temp_clean_{profile}_candidate",
+            version="v4",
+            target_name="temp",
+            track="nwp_assisted_mos",
+            model_type="ridge",
+            rmse=1.0,
+            mae=0.8,
+            bias=0.0,
+            artifact_profile=profile,
+            future_feature_source="prepared_forecast_csv",
+            operational_valid=True,
+            backtest_only=False,
+            forecast_schema_valid=True,
+            forecast_source_schema_valid=True,
+            forecast_source_path="data/raw/nwp/prepared_forecast.csv",
+            uses_patch_features=True,
+            patch_size=3,
+            patch_improvement_rmse=0.1,
+            is_diagnostic=False,
+            is_representative_run=True,
+            included_in_main_leaderboard=True,
+            artifact_dir=str(exp),
+        )
+
+        html = render_report([record], title="Report", experiments_root=tmp_path, include_images=False)
+        gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+
+        assert "FAIL" in gate_section
+        assert record.experiment_name not in gate_section
+
+
+def test_inline_filter_json_is_script_safe(tmp_path: Path) -> None:
+    record = ExperimentRecord(
+        experiment_name="safe",
+        version="v4 </script><script>alert(1)</script>",
+        target_name="temp",
+        track="observation_only",
+        model_type="ridge",
+        rmse=1.0,
+        mae=0.8,
+        bias=0.0,
+        included_in_main_leaderboard=True,
+        artifact_dir=str(tmp_path / "exp"),
+    )
+
+    html = render_report([record], title="Report", experiments_root=tmp_path, include_images=False)
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+
+    assert "</script>" not in script.lower()
+    assert "\\u003c/script\\u003e" in script.lower()

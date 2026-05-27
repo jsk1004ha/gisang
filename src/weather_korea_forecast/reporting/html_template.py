@@ -39,7 +39,7 @@ def render_report(
     warnings = _warnings_section(records)
     charts = _summary_charts(main_records)
     kpis = _kpi_cards(main_records, best, diagnostic_count=len(diagnostic), alias_count=len(alias_records))
-    filters_payload = json.dumps(_filter_options(main_records), ensure_ascii=False)
+    filters_payload = _json_for_inline_script(_filter_options(main_records))
     return f"""<!doctype html>
 <html lang=\"ko\">
 <head>
@@ -64,6 +64,8 @@ def render_report(
   {_operational_banner(main_records)}
   {kpis}
   {_readiness_section(records, main_records)}
+  {_v4_validation_section(records, main_records)}
+  {_v4_c_gate_section(main_records)}
   <section class=\"card\">
     <h2>리더보드</h2>
     <div class=\"filters\">
@@ -103,6 +105,17 @@ def render_report(
 </body>
 </html>
 """
+
+
+def _json_for_inline_script(value: object) -> str:
+    payload = json.dumps(value, ensure_ascii=False)
+    return (
+        payload.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
 
 def _select(element_id: str, label: str) -> str:
@@ -223,8 +236,8 @@ def _detail_section(record: ExperimentRecord, *, image_mode: str = "full") -> st
       <summary><span class=\"mono\">{html.escape(record.experiment_name)}</span> <span>{html.escape(metrics)}</span></summary>
       <div class=\"detail-body\">
         <div class=\"grid two\">
-          <div><h3>성능 지표</h3><dl>{_dl({'타깃': record.target_name, '트랙': record.track, '모델': record.model_type, 'Encoder 길이': record.encoder_length, '예측 길이': record.prediction_length, 'RMSE': record.rmse, 'MAE': record.mae, 'Bias': record.bias, 'MAPE': record.mape, 'Raw RMSE': record.raw_rmse, 'Raw MAE': record.raw_mae, 'Raw Bias': record.raw_bias, 'Val RMSE': record.val_rmse, 'RMSE 목표': record.rmse_goal, '목표 상태': goal, '최악 horizon': record.worst_horizon_step, '최악 horizon RMSE': record.worst_horizon_rmse, '최악 horizon MAE': record.worst_horizon_mae, '최악 horizon Bias': record.worst_horizon_bias, '최악 관측소': record.worst_station_id, '최악 관측소 RMSE': record.worst_station_rmse})}</dl></div>
-          <div><h3>운영/대표 run 상태</h3><dl>{_dl({'미래 feature 소스': record.future_feature_source, '미래 기상 feature 사용': record.uses_future_weather_features, '운영 가능': record.operational_valid, '백테스트 전용': record.backtest_only, '진단/oracle': record.is_diagnostic, 'artifact profile': record.artifact_profile, 'alias artifact': record.is_alias_artifact, '대표 run': record.is_representative_run, 'canonical id': record.canonical_experiment_id, 'run timestamp': record.run_timestamp, '누수 위험 메모': record.leakage_risk_note, 'V4 단계': record.v4_stage, 'forecast schema version': record.forecast_schema_version, 'forecast schema valid': record.forecast_schema_valid, 'forecast source schema valid': record.forecast_source_schema_valid, 'forecast source path': record.forecast_source_path, 'patch features': record.patch_features_enabled, 'uses patch features': record.uses_patch_features, 'patch size': record.patch_size, 'patch feature set': record.patch_feature_set, 'patch feature mode': record.patch_feature_mode, 'Artifact 경로': record.artifact_dir})}</dl></div>
+          <div><h3>성능 지표</h3><dl>{_dl({'타깃': record.target_name, '트랙': record.track, '모델': record.model_type, 'Encoder 길이': record.encoder_length, '예측 길이': record.prediction_length, 'RMSE': record.rmse, 'MAE': record.mae, 'Bias': record.bias, 'MAPE': record.mape, 'Raw RMSE': record.raw_rmse, 'Raw MAE': record.raw_mae, 'Raw Bias': record.raw_bias, 'Val RMSE': record.val_rmse, 'RMSE 목표': record.rmse_goal, '목표 상태': goal, '최악 horizon': record.worst_horizon_step, '최악 horizon RMSE': record.worst_horizon_rmse, '최악 horizon MAE': record.worst_horizon_mae, '최악 horizon Bias': record.worst_horizon_bias, '최악 관측소': record.worst_station_id, '최악 관측소 RMSE': record.worst_station_rmse, 'Backtest baseline RMSE': record.backtest_baseline_rmse, 'Operational gap': record.operational_gap, 'Operational gap status': record.operational_gap_status, 'Patch baseline RMSE': record.patch_baseline_rmse, 'Patch improvement RMSE': record.patch_improvement_rmse, 'Patch improvement worst station': record.patch_improvement_worst_station, 'Patch improvement late horizon': record.patch_improvement_late_horizon})}</dl></div>
+          <div><h3>운영/대표 run 상태</h3><dl>{_dl({'미래 feature 소스': record.future_feature_source, '미래 기상 feature 사용': record.uses_future_weather_features, '운영 가능': record.operational_valid, '백테스트 전용': record.backtest_only, '진단/oracle': record.is_diagnostic, 'artifact profile': record.artifact_profile, 'alias artifact': record.is_alias_artifact, '대표 run': record.is_representative_run, 'canonical id': record.canonical_experiment_id, 'run timestamp': record.run_timestamp, '누수 위험 메모': record.leakage_risk_note, 'V4 단계': record.v4_stage, 'forecast schema version': record.forecast_schema_version, 'forecast schema valid': record.forecast_schema_valid, 'forecast source schema valid': record.forecast_source_schema_valid, 'forecast archive adequate': record.forecast_archive_adequate, 'forecast archive rows': record.forecast_archive_row_count, 'forecast archive stations': record.forecast_archive_station_count, 'forecast archive issue times': record.forecast_archive_issue_time_count, 'forecast source path': record.forecast_source_path, 'patch features': record.patch_features_enabled, 'uses patch features': record.uses_patch_features, 'patch size': record.patch_size, 'patch feature set': record.patch_feature_set, 'patch feature mode': record.patch_feature_mode, 'Artifact 경로': record.artifact_dir})}</dl></div>
         </div>
         <h3>경고 / 메모</h3>{warnings_block}
         {images}
@@ -253,6 +266,22 @@ def _kpi_cards(records: list[ExperimentRecord], best: dict[str, ExperimentRecord
 
 
 def _readiness_section(all_records: list[ExperimentRecord], main_records: list[ExperimentRecord]) -> str:
+    operational_temp = [
+        r
+        for r in main_records
+        if r.target_name == "temp" and r.track == "nwp_assisted_mos" and r.operational_valid is True and r.rmse is not None
+    ]
+    best_operational_temp = min((float(r.rmse) for r in operational_temp), default=None)
+    patch_candidates = [
+        r
+        for r in main_records
+        if r.target_name == "temp" and r.track == "nwp_assisted_mos" and r.uses_patch_features is True
+    ]
+    patch_improved = any(
+        (r.patch_improvement_rmse is not None and r.patch_improvement_rmse > 0)
+        or (r.patch_improvement_worst_station is not None and r.patch_improvement_worst_station > 0)
+        for r in patch_candidates
+    )
     checks = [
         (
             "Diagnostic/oracle 분리",
@@ -275,14 +304,9 @@ def _readiness_section(all_records: list[ExperimentRecord], main_records: list[E
             "목표 RMSE 1.0°C 이하. 미달이면 residual LGBM/ensemble/calibration 후보를 유지합니다.",
         ),
         (
-            "Operational-valid forecast source",
-            "pass" if any(r.operational_valid is True for r in main_records) else "warn",
-            "operational_valid=true 대표 모델이 있어야 V4 운영 단계로 넘어갈 수 있습니다.",
-        ),
-        (
-            "Humidity ≤ 10%p",
-            "pass" if (_best_rmse(main_records, target="humidity") or float("inf")) <= 10.0 else "warn",
-            f"현재 {_fmt(_best_rmse(main_records, target='humidity'))}; dew point/depression 및 predicted temp 연결이 필요합니다.",
+            "Prepared forecast CSV adapter implemented",
+            "pass" if any(r.future_feature_source == "prepared_forecast_csv" or r.forecast_schema_version for r in all_records) else "warn",
+            "prepared_forecast_csv schema/metadata가 report에 수집되어야 합니다.",
         ),
         (
             "V4 forecast schema validation",
@@ -290,9 +314,44 @@ def _readiness_section(all_records: list[ExperimentRecord], main_records: list[E
             "prepared forecast CSV schema가 검증된 대표 run이 있어야 operational_valid=true를 신뢰할 수 있습니다.",
         ),
         (
+            "Operational-valid temp model exists",
+            "pass" if operational_temp else "warn",
+            "operational_valid=true 기온 MOS 대표 모델이 있어야 V4-C 운영 검증으로 넘어갈 수 있습니다.",
+        ),
+        (
+            "Operational temp RMSE ≤ 1.5°C",
+            "pass" if (best_operational_temp if best_operational_temp is not None else float("inf")) <= 1.5 else "warn",
+            f"현재 {_fmt(best_operational_temp)}; V4-C 진입 1차 gate입니다.",
+        ),
+        (
+            "Operational temp RMSE ≤ 1.2°C",
+            "pass" if (best_operational_temp if best_operational_temp is not None else float("inf")) <= 1.2 else "warn",
+            "좋은 operational 모델 기준입니다.",
+        ),
+        (
+            "Operational temp RMSE ≤ 1.0°C",
+            "pass" if (best_operational_temp if best_operational_temp is not None else float("inf")) <= 1.0 else "warn",
+            "최종 운영 목표입니다.",
+        ),
+        (
+            "Patch ablation completed",
+            "pass" if any(r.uses_patch_features is True for r in main_records) else "warn",
+            "no patch / 3x3 / 5x5 비교 대표 run이 필요합니다. Diagnostic smoke는 성능 gate를 충족하지 않습니다.",
+        ),
+        (
             "V4 patch feature readiness",
             "pass" if any(r.patch_features_enabled is True for r in main_records) else "warn",
             "3x3/5x5 NWP grid patch summary feature run이 main report에 들어와야 spatial V4 비교가 가능합니다.",
+        ),
+        (
+            "Patch improves RMSE or worst station",
+            "pass" if patch_improved else "warn",
+            "patch_improvement_rmse 또는 patch_improvement_worst_station 중 하나가 양수이면 PASS입니다.",
+        ),
+        (
+            "Humidity honest RMSE ≤ 10%p",
+            "pass" if (_best_rmse(main_records, target="humidity") or float("inf")) <= 10.0 else "warn",
+            f"현재 {_fmt(_best_rmse(main_records, target='humidity'))}; 습도는 V3.5 개선 트랙에 유지합니다.",
         ),
         (
             "Observation-only temp ≤ 2.0°C",
@@ -309,6 +368,199 @@ def _readiness_section(all_records: list[ExperimentRecord], main_records: list[E
       <p class="muted">V4 진입 전 temp MOS 운영성, humidity 목표, observation-only baseline, report 신뢰도를 동시에 확인합니다.</p>
       <table><thead><tr><th>항목</th><th>상태</th><th>근거 / 다음 작업</th></tr></thead><tbody>{rows}</tbody></table>
     </section>"""
+
+
+def _v4_validation_section(all_records: list[ExperimentRecord], main_records: list[ExperimentRecord]) -> str:
+    prepared = [r for r in all_records if r.future_feature_source == "prepared_forecast_csv"]
+    operational = [r for r in main_records if r.operational_valid is True]
+    patch = [r for r in all_records if r.uses_patch_features is True or r.patch_features_enabled is True]
+    operational_temp = [
+        r
+        for r in main_records
+        if r.target_name == "temp" and r.track == "nwp_assisted_mos" and r.operational_valid is True and r.rmse is not None
+    ]
+    backtest_temp = [
+        r
+        for r in main_records
+        if r.target_name == "temp" and r.track == "nwp_assisted_mos" and r.backtest_only is True and r.rmse is not None
+    ]
+    best_operational = min(operational_temp, key=lambda r: r.rmse or float("inf"), default=None)
+    best_backtest = min(backtest_temp, key=lambda r: r.rmse or float("inf"), default=None)
+    operational_gap = None
+    gap_status = None
+    if best_operational and best_backtest and best_operational.rmse is not None and best_backtest.rmse is not None:
+        operational_gap = float(best_operational.rmse) - float(best_backtest.rmse)
+        gap_status = _gap_label(operational_gap)
+
+    patch_rows = _patch_ablation_rows(main_records)
+    metrics = {
+        "V4 실험 수": sum(1 for r in all_records if str(r.version).startswith("v4") or str(r.v4_stage).startswith("v4")),
+        "operational_valid=true 대표 실험 수": len(operational),
+        "prepared_forecast_csv 실험 수": len(prepared),
+        "patch feature 사용 실험 수": len(patch),
+        "best operational temp model": best_operational.experiment_name if best_operational else "n/a",
+        "best operational temp RMSE": best_operational.rmse if best_operational else None,
+        "best backtest temp model": best_backtest.experiment_name if best_backtest else "n/a",
+        "backtest RMSE": best_backtest.rmse if best_backtest else None,
+        "operational_gap": operational_gap,
+        "operational_gap 해석": gap_status,
+    }
+    return f"""<section class="card v4-validation">
+      <h2>V4 Validation Sprint</h2>
+      <p class="muted">prepared forecast CSV operational 경로, backtest vs operational gap, patch ablation 상태를 한 곳에서 확인합니다. Synthetic/diagnostic smoke는 main 성능 판정에서 제외됩니다.</p>
+      <dl>{_dl(metrics)}</dl>
+      <h3>Patch feature ablation</h3>
+      <table><thead><tr><th>범주</th><th>Best RMSE</th><th>Worst station RMSE</th><th>Late/worst horizon RMSE</th><th>실험</th></tr></thead><tbody>{patch_rows}</tbody></table>
+    </section>"""
+
+
+def _is_trusted_v4_operational_forecast_record(record: ExperimentRecord) -> bool:
+    """Return True only for real prepared-forecast operational temp MOS records.
+
+    The V4-C gate is stricter than the main leaderboard: a row must prove
+    prepared forecast provenance, schema validity, and non-backtest status
+    directly. This prevents self-reported synthetic/generated/smoke artifacts
+    from satisfying the operational expansion gate.
+    """
+
+    if record.target_name != "temp" or record.track != "nwp_assisted_mos" or record.rmse is None:
+        return False
+    if record.operational_valid is not True or record.backtest_only is not False:
+        return False
+    if record.future_feature_source != "prepared_forecast_csv":
+        return False
+    if record.forecast_source_schema_valid is not True:
+        return False
+    if record.forecast_archive_adequate is not True:
+        return False
+    if not record.forecast_source_path:
+        return False
+    if record.is_diagnostic or record.is_alias_artifact or not record.is_representative_run:
+        return False
+    blocked_tokens = ("synthetic", "smoke", "oracle", "diagnostic", "fixture", "generated")
+    artifact_profile = str(record.artifact_profile or "").lower()
+    if any(token in artifact_profile for token in blocked_tokens):
+        return False
+    provenance_text = " ".join(
+        str(value or "")
+        for value in (
+            record.experiment_name,
+            record.model_name,
+            record.track,
+            record.v4_stage,
+            record.forecast_source_path,
+            record.artifact_dir,
+            record.leakage_risk_note,
+        )
+    ).lower()
+    return not any(token in provenance_text for token in blocked_tokens)
+
+
+def _v4_c_gate_section(main_records: list[ExperimentRecord]) -> str:
+    operational_temp = [r for r in main_records if _is_trusted_v4_operational_forecast_record(r)]
+    best_operational = min(operational_temp, key=lambda r: r.rmse or float("inf"), default=None)
+    best_operational_rmse = float(best_operational.rmse) if best_operational and best_operational.rmse is not None else None
+    patch_candidates = [r for r in operational_temp if r.uses_patch_features is True and r.rmse is not None]
+    patch_completed = bool(patch_candidates)
+    patch_improves = any(
+        (r.patch_improvement_rmse is not None and r.patch_improvement_rmse > 0)
+        or (r.patch_improvement_worst_station is not None and r.patch_improvement_worst_station > 0)
+        or (r.patch_improvement_late_horizon is not None and r.patch_improvement_late_horizon > 0)
+        for r in patch_candidates
+    )
+    gap_ok = any(r.operational_gap is not None and r.operational_gap <= 0.5 for r in operational_temp)
+    required = [
+        ("trusted prepared forecast operational temp model exists", bool(operational_temp)),
+        ("prepared forecast schema valid", bool(operational_temp)),
+        ("real forecast archive adequate", bool(operational_temp)),
+        ("backtest_only=false and source=prepared_forecast_csv", bool(operational_temp)),
+        ("operational temp RMSE ≤ 1.5°C", best_operational_rmse is not None and best_operational_rmse <= 1.5),
+        ("real patch ablation completed", patch_completed),
+        ("report generated", True),
+    ]
+    missing = [name for name, ok in required if not ok]
+    if not missing:
+        status = "PASS"
+        badge = "pass"
+        next_action = "V4-C 전국 확장으로 넘어갈 수 있습니다. 좋은 조건(≤1.2°C, gap≤0.5, patch worst-station 개선)도 함께 확인하세요."
+    elif operational_temp:
+        status = "WARN"
+        badge = "warn"
+        next_action = "부족한 V4-C 조건을 보강한 뒤 전국 확장을 시작하세요."
+    else:
+        status = "FAIL"
+        badge = "fail"
+        next_action = "real prepared forecast NWP archive로 operational_valid temp MOS 모델을 먼저 생성해야 합니다."
+    good = {
+        "operational temp RMSE ≤ 1.2°C": best_operational_rmse is not None and best_operational_rmse <= 1.2,
+        "patch improves worst/late/overall": patch_improves,
+        "operational_gap ≤ 0.5°C": gap_ok,
+    }
+    rows = "".join(
+        f"<tr><td>{html.escape(name)}</td><td>{_readiness_badge('pass' if ok else 'fail')}</td></tr>"
+        for name, ok in required
+    )
+    good_rows = "".join(
+        f"<tr><td>{html.escape(name)}</td><td>{_readiness_badge('pass' if ok else 'warn')}</td></tr>"
+        for name, ok in good.items()
+    )
+    summary = {
+        "V4-C gate status": status,
+        "best operational temp model": best_operational.experiment_name if best_operational else "n/a",
+        "best operational temp RMSE": best_operational_rmse,
+        "missing required conditions": ", ".join(missing) if missing else "none",
+        "next action": next_action,
+    }
+    return f"""<section class="card v4-c-gate">
+      <h2>V4-C Gate</h2>
+      <p>{_readiness_badge(badge)} <b>{html.escape(status)}</b></p>
+      <dl>{_dl(summary)}</dl>
+      <h3>필수 조건</h3>
+      <table><thead><tr><th>조건</th><th>상태</th></tr></thead><tbody>{rows}</tbody></table>
+      <h3>추가 좋은 조건</h3>
+      <table><thead><tr><th>조건</th><th>상태</th></tr></thead><tbody>{good_rows}</tbody></table>
+    </section>"""
+
+
+def _patch_ablation_rows(records: list[ExperimentRecord]) -> str:
+    candidates = [
+        r
+        for r in records
+        if r.complete
+        and r.rmse is not None
+        and r.target_name == "temp"
+        and r.track == "nwp_assisted_mos"
+        and (r.operational_valid is True or str(r.v4_stage).startswith("v4"))
+    ]
+    groups: list[tuple[str, callable]] = [
+        ("no patch", lambda r: r.uses_patch_features is not True),
+        ("3x3 patch", lambda r: r.uses_patch_features is True and r.patch_size == 3),
+        ("5x5 patch", lambda r: r.uses_patch_features is True and r.patch_size == 5),
+    ]
+    rows = []
+    for label, predicate in groups:
+        group = [r for r in candidates if predicate(r)]
+        best = min(group, key=lambda r: r.rmse or float("inf"), default=None)
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(label)}</td>"
+            f"<td class='num'>{_fmt(best.rmse if best else None)}</td>"
+            f"<td class='num'>{_fmt(best.worst_station_rmse if best else None)}</td>"
+            f"<td class='num'>{_fmt(best.worst_horizon_rmse if best else None)}</td>"
+            f"<td class='mono'>{html.escape(best.experiment_name if best else 'n/a')}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def _gap_label(gap: float | None) -> str:
+    if gap is None:
+        return "n/a"
+    if gap <= 0.2:
+        return "매우 좋음 (≤0.2°C)"
+    if gap <= 0.5:
+        return "허용 가능 (≤0.5°C)"
+    return "NWP source / feature mismatch 점검 필요 (>0.5°C)"
 
 
 def _readiness_badge(status: str) -> str:

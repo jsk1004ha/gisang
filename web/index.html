@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>기상 예보 MVP</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="app">
+    <section class="banner" id="warning">운영 검증 전 연구/백테스트 기반 예측입니다. 실제 예보로 사용하지 마세요.</section>
+    <header>
+      <h1>한국 날씨 예보 MVP</h1>
+      <p>Forecast API의 <code>forecast_points.json</code>을 표시하는 사이트 MVP입니다.</p>
+    </header>
+    <section class="controls">
+      <label>지역/관측소 선택 <select id="stationSelect"></select></label>
+      <span id="modelStatus" class="badge">model status loading</span>
+    </section>
+    <section class="grid">
+      <article class="card" id="forecastCard"><h2>예보 카드</h2><p>데이터 로딩 중...</p></article>
+      <article class="card"><h2>24시간 기온</h2><div id="tempChart" class="chart"></div></article>
+      <article class="card"><h2>습도 beta</h2><div id="humidityChart" class="chart"></div></article>
+    </section>
+    <section class="card"><h2>시간대별 예보</h2><table id="hourlyTable"><thead><tr><th>시간</th><th>기온</th><th>습도</th><th>날씨</th><th>신뢰도</th></tr></thead><tbody></tbody></table></section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

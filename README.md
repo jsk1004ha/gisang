@@ -838,3 +838,23 @@ V3 NWP-assisted/MOS 실험은 observation-only와 별도 track으로 비교해�
 backtest-only로 표시되며, 운영 추론에서는 `--operational`이 이러한 모델을 차단한다.
 prepared forecast CSV를 쓰는 경우 `prepared_forecast_csv`, `gfs_forecast`,
 `ecmwf_forecast`, `kma_forecast` 중 하나로 source를 명시한다.
+
+## Forecast Web Service MVP
+
+G021 adds a service-layer forecast artifact format and API skeleton. Research outputs such as `predictions_test.csv` remain separate from production forecast artifacts under `data/forecasts/`.
+
+Export example:
+
+```bash
+PYTHONPATH=src python -m weather_korea_forecast.service.export_forecast \
+  --predictions path/to/predictions_inference.csv \
+  --station-metadata data/raw/metadata/stations.csv \
+  --output-dir data/forecasts \
+  --forecast-run-id auto \
+  --operational-valid false \
+  --backtest-only true
+```
+
+API helpers live in `weather_korea_forecast.api.main`. If FastAPI is installed, run with `uvicorn weather_korea_forecast.api.main:app`. Without FastAPI, tests use the same pure-Python endpoint helpers.
+
+Operational warning: until an operational-valid real forecast NWP archive is available, website forecasts must be shown as research/backtest outputs.

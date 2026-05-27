@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
+from weather_korea_forecast.reporting.html_template import render_report
 from weather_korea_forecast.reporting.collect_experiments import (
     collect_all,
     main_leaderboard_records,
@@ -206,3 +208,233 @@ def test_collect_experiment_warns_when_v4_schema_invalid(tmp_path: Path) -> None
     assert record.forecast_schema_valid is False
     assert record.patch_features_enabled is False
     assert "forecast_schema_valid=false" in record.warnings
+
+
+def test_collect_experiment_adds_operational_gap_and_excludes_diagnostic_smoke(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    _write_experiment_with_summary(
+        root,
+        "v3_temp_mos_backtest_20260527T000000Z",
+        {
+            "version": "v3",
+            "metrics": {"rmse": 1.1, "mae": 0.8, "bias": 0.0},
+            "future_feature_source": "era5_reanalysis",
+            "operational_valid": False,
+            "backtest_only": True,
+        },
+    )
+    _write_experiment_with_summary(
+        root / "v4_experiments",
+        "v4_temp_mos_prepared_20260527T000000Z",
+        {
+            "version": "v4",
+            "metrics": {"rmse": 1.35, "mae": 0.9, "bias": 0.0},
+            "future_feature_source": "prepared_forecast_csv",
+            "operational_valid": True,
+            "backtest_only": False,
+            "forecast_schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+        },
+    )
+    _write_experiment_with_summary(
+        root / "v4_validation_sprint" / "diagnostic_smoke_experiments",
+        "v4_temp_mos_prepared_synthetic_smoke_20260527T000000Z",
+        {
+            "version": "v4",
+            "metrics": {"rmse": 0.01, "mae": 0.01, "bias": 0.0},
+            "future_feature_source": "prepared_forecast_csv",
+            "operational_valid": True,
+            "backtest_only": False,
+            "forecast_schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+            "experiment": {"notes": "DIAGNOSTIC synthetic smoke"},
+        },
+    )
+
+    records = collect_all(root)
+    by_name = {record.experiment_name: record for record in records}
+
+    operational = by_name["v4_temp_mos_prepared_20260527T000000Z"]
+    assert operational.backtest_baseline_rmse == 1.1
+    assert operational.operational_gap == pytest.approx(0.25)
+    assert operational.operational_gap_status == "acceptable"
+    smoke = by_name["v4_temp_mos_prepared_synthetic_smoke_20260527T000000Z"]
+    assert smoke.is_diagnostic is True
+    assert smoke.included_in_main_leaderboard is False
+    assert smoke.backtest_baseline_rmse is None
+    assert smoke.operational_gap is None
+
+
+def test_collect_experiment_excludes_synthetic_smoke_name_without_diagnostic_note(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    _write_experiment_with_summary(
+        root,
+        "v4_temp_mos_prepared_synthetic_smoke_20260527T000000Z",
+        {
+            "version": "v4",
+            "metrics": {"rmse": 0.01, "mae": 0.01, "bias": 0.0},
+            "future_feature_source": "prepared_forecast_csv",
+            "operational_valid": True,
+            "backtest_only": False,
+            "forecast_schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+        },
+    )
+
+    record = collect_all(root)[0]
+
+    assert record.is_diagnostic is True
+    assert record.included_in_main_leaderboard is False
+    assert main_leaderboard_records([record]) == []
+
+
+def test_collect_experiment_reads_nwp_mos_metrics_raw_test_file(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    exp = _write_experiment_with_summary(
+        root,
+        "v4_temp_operational_calibrated",
+        {
+            "version": "v4",
+            "metrics": {"rmse": 1.2, "mae": 0.8, "bias": 0.0},
+            "future_feature_source": "prepared_forecast_csv",
+            "operational_valid": True,
+            "backtest_only": False,
+            "forecast_schema_valid": True,
+        },
+    )
+    (exp / "metrics_raw_test.json").write_text(json.dumps({"rmse": 1.4, "mae": 0.9, "bias": 0.2}), encoding="utf-8")
+
+    record = collect_all(root)[0]
+
+    assert record.rmse == 1.2
+    assert record.raw_rmse == 1.4
+    assert record.raw_mae == 0.9
+    assert record.raw_bias == 0.2
+
+
+def test_collect_experiment_preserves_generated_profile_and_blocks_v4_c_gate(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    _write_experiment_with_summary(
+        root,
+        "v4_temp_clean_named_operational_candidate",
+        {
+            "version": "v4",
+            "target_name": "temp",
+            "track": "nwp_assisted_mos",
+            "model_type": "ridge",
+            "metrics": {"rmse": 1.0, "mae": 0.8, "bias": 0.0},
+            "artifact_profile": "generated",
+            "future_feature_source": "prepared_forecast_csv",
+            "operational_valid": True,
+            "backtest_only": False,
+            "forecast_schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+            "forecast_source_path": "data/raw/nwp/prepared_forecast.csv",
+            "patch_features": {"enabled": True, "patch_size": 3, "feature_set": "summary_v1"},
+            "patch_improvement_rmse": 0.1,
+        },
+    )
+
+    record = collect_all(root)[0]
+
+    assert record.artifact_profile == "generated"
+    assert record.is_diagnostic is True
+    assert record.included_in_main_leaderboard is False
+    assert main_leaderboard_records([record]) == []
+
+    html = render_report([record], title="Report", experiments_root=tmp_path, include_images=False)
+    gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+    assert "FAIL" in gate_section
+    assert "v4_temp_clean_named_operational_candidate" not in gate_section
+
+
+def test_collect_experiment_blocks_fixture_forecast_source_path_from_main_leaderboard(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    _write_experiment_with_summary(
+        root,
+        "v4_temp_clean_named_path_fixture_candidate",
+        {
+            "version": "v4",
+            "target_name": "temp",
+            "track": "nwp_assisted_mos",
+            "model_type": "ridge",
+            "metrics": {"rmse": 1.0, "mae": 0.8, "bias": 0.0},
+            "future_feature_source": "prepared_forecast_csv",
+            "operational_valid": True,
+            "backtest_only": False,
+            "forecast_schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+            "forecast_source_path": "data/artifacts/fixtures/generated_prepared_forecast.csv",
+        },
+    )
+
+    record = collect_all(root)[0]
+
+    assert record.forecast_source_path == "data/artifacts/fixtures/generated_prepared_forecast.csv"
+    assert record.is_diagnostic is True
+    assert record.included_in_main_leaderboard is False
+    assert main_leaderboard_records([record]) == []
+
+
+def test_collect_experiment_blocks_nested_future_feature_provenance_note(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    _write_experiment_with_summary(
+        root,
+        "v4_temp_clean_named_nested_metadata_candidate",
+        {
+            "version": "v4",
+            "target_name": "temp",
+            "track": "nwp_assisted_mos",
+            "model_type": "ridge",
+            "metrics": {"rmse": 1.0, "mae": 0.8, "bias": 0.0},
+            "future_feature_source": "prepared_forecast_csv",
+            "future_features": {"note": "generated synthetic fixture metadata"},
+            "operational_valid": True,
+            "backtest_only": False,
+            "forecast_schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+            "forecast_source_path": "data/raw/nwp/prepared_forecast.csv",
+            "patch_features": {"enabled": True, "patch_size": 3, "feature_set": "summary_v1"},
+            "patch_improvement_rmse": 0.1,
+        },
+    )
+
+    record = collect_all(root)[0]
+
+    assert record.is_diagnostic is True
+    assert record.included_in_main_leaderboard is False
+    assert main_leaderboard_records([record]) == []
+
+    html = render_report([record], title="Report", experiments_root=tmp_path, include_images=False)
+    gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+    assert "FAIL" in gate_section
+    assert "v4_temp_clean_named_nested_metadata_candidate" not in gate_section
+
+
+def test_collect_experiment_blocks_nested_provenance_key_marker(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    _write_experiment_with_summary(
+        root,
+        "v4_temp_clean_named_nested_key_candidate",
+        {
+            "version": "v4",
+            "target_name": "temp",
+            "track": "nwp_assisted_mos",
+            "model_type": "ridge",
+            "metrics": {"rmse": 1.0, "mae": 0.8, "bias": 0.0},
+            "future_feature_source": "prepared_forecast_csv",
+            "operational_valid": True,
+            "backtest_only": False,
+            "forecast_schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+            "forecast_archive_adequate": True,
+            "forecast_source_path": "data/raw/nwp/prepared_forecast.csv",
+            "provenance": {"synthetic": True},
+            "patch_features": {"enabled": True, "patch_size": 3, "feature_set": "summary_v1"},
+            "patch_improvement_rmse": 0.1,
+        },
+    )
+
+    record = collect_all(root)[0]
+
+    assert record.is_diagnostic is True
+    assert record.included_in_main_leaderboard is False
+    assert main_leaderboard_records([record]) == []
+
+    html = render_report([record], title="Report", experiments_root=tmp_path, include_images=False)
+    gate_section = html.split("V4-C Gate", 1)[1].split("</section>", 1)[0]
+    assert "FAIL" in gate_section
+    assert "v4_temp_clean_named_nested_key_candidate" not in gate_section

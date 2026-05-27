@@ -15,6 +15,7 @@ from weather_korea_forecast.utils.io import read_table, write_json, write_table
 from weather_korea_forecast.utils.paths import resolve_path
 from weather_korea_forecast.v2.data import load_or_prepare_v2_training_table
 from weather_korea_forecast.v2.future_features import build_future_feature_metadata, load_future_weather_archive
+from weather_korea_forecast.v2.train import apply_postprocessing, compute_bias_correction
 
 
 DEFAULT_INIT_FEATURES = [
@@ -58,7 +59,7 @@ DEFAULT_INIT_FEATURES = [
     "is_daytime",
 ]
 
-DEFAULT_STATIC_FEATURES = ["lat", "lon", "elevation", "coastal_distance_km"]
+DEFAULT_STATIC_FEATURES = ["lat", "lon", "elevation", "coastal_distance_km", "region", "region_class", "terrain_class", "coastal_class"]
 
 DEFAULT_NWP_FEATURE_PREFIXES = ("nwp_", "gfs_", "kma_", "ecmwf_", "gdps_", "um_")
 
@@ -130,6 +131,19 @@ def run_nwp_mos_experiment(config: dict[str, Any]) -> Path:
         metrics_by_split[split_name] = compute_prediction_metrics(pred_frame)
         write_table(pred_frame, experiment_dir / f"predictions_{split_name}.csv")
         write_json(metrics_by_split[split_name], experiment_dir / f"metrics_{split_name}.json")
+
+    bias_payload = {"enabled": False, "mode": "auto", "method": "auto", "values": []}
+    if "val" in prediction_frames:
+        bias_payload = compute_bias_correction(prediction_frames["val"], config)
+    write_json(bias_payload, experiment_dir / "bias_correction.json")
+    if "test" in prediction_frames:
+        raw_metrics = dict(metrics_by_split.get("test", {}))
+        corrected_test = apply_postprocessing(prediction_frames["test"], config, bias_payload)
+        corrected_metrics = compute_prediction_metrics(corrected_test)
+        write_table(corrected_test, experiment_dir / "predictions_test.csv")
+        write_json(raw_metrics, experiment_dir / "metrics_raw_test.json")
+        write_json(corrected_metrics, experiment_dir / "metrics_test.json")
+        metrics_by_split["test"] = corrected_metrics
 
     if hasattr(model, "feature_importances_"):
         importance = pd.DataFrame(
@@ -434,11 +448,18 @@ def _predict_actual(model: Any, X: np.ndarray, frame: pd.DataFrame, baseline_col
 
 
 def _prediction_frame(frame: pd.DataFrame, prediction: np.ndarray, target_name: str) -> pd.DataFrame:
-    result = frame[["station_id", "issue_time", "valid_time", "lead_hour", "actual", "split"]].copy()
+    columns = ["station_id", "issue_time", "valid_time", "lead_hour", "actual", "split"]
+    for optional in ("region", "region_class", "terrain_class", "coastal_class"):
+        if optional in frame.columns:
+            columns.append(optional)
+    result = frame[columns].copy()
     result["prediction"] = prediction.astype(float)
     result["target_name"] = target_name
+    result["prediction_start"] = result["issue_time"]
     result = result.rename(columns={"valid_time": "timestamp", "lead_hour": "horizon_step"})
-    return result[["station_id", "issue_time", "timestamp", "horizon_step", "target_name", "prediction", "actual", "split"]]
+    ordered = ["station_id", "issue_time", "prediction_start", "timestamp", "horizon_step", "target_name", "prediction", "actual", "split"]
+    ordered.extend([column for column in ("region", "region_class", "terrain_class", "coastal_class") if column in result.columns])
+    return result[ordered]
 
 
 def _create_experiment_dir(config: dict[str, Any]) -> Path:

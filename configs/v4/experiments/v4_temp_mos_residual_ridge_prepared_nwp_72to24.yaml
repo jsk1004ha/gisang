@@ -50,3 +50,22 @@ model:
 artifacts:
   root_dir: data/artifacts/v4_experiments
   profile: minimal
+
+evaluation:
+  bias_correction:
+    enabled: true
+    mode: auto
+    method: auto
+    candidate_modes:
+      - global
+      - per_horizon
+      - per_station_horizon
+      - per_region_horizon
+    candidate_methods:
+      - mean_bias
+      - affine
+      - quantile
+    calibration_fraction: 0.5
+    selection_metric: rmse
+    min_improvement: 0.0
+    refit_after_accept: true

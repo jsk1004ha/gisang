@@ -54,6 +54,13 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
         v4_meta.get("forecast_schema"),
         summary.get("forecast_schema"),
     )
+    forecast_archive = _merge_dicts(
+        future.get("archive"),
+        config.get("forecast_archive"),
+        v4_meta.get("forecast_archive"),
+        summary.get("forecast_archive"),
+        summary.get("forecast_archive_quality"),
+    )
     patch_features = _merge_dicts(
         future.get("patch_features"),
         config.get("patch_features"),
@@ -102,6 +109,19 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
         warnings.append("forecast_schema_valid=false")
     if forecast_schema_valid is None and _bool(summary.get("operational_valid", future.get("operational_valid"))) is True:
         warnings.append("operational_valid requires forecast_schema_valid=true")
+    forecast_archive_adequate = _bool(
+        summary.get(
+            "forecast_archive_adequate",
+            summary.get(
+                "real_forecast_archive_adequate",
+                forecast_archive.get("adequate", forecast_archive.get("real_archive_adequate")),
+            ),
+        )
+    )
+    if forecast_archive_adequate is False:
+        warnings.append("forecast_archive_adequate=false")
+    if forecast_archive_adequate is None and _bool(summary.get("operational_valid", future.get("operational_valid"))) is True:
+        warnings.append("operational_valid requires forecast_archive_adequate=true")
     if _unknown_region(exp_dir):
         warnings.append("region_class contains unknown")
     if bias and not bool(bias.get("enabled", False)) and bias.get("disabled_reason"):
@@ -123,6 +143,13 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
     run_timestamp = _run_timestamp(exp_dir)
     experiment_name = str(summary.get("experiment_name") or config.get("experiment", {}).get("name") or exp_dir.name)
     model_type = str(summary.get("model_type") or config.get("model", {}).get("type") or "unknown")
+    forecast_source_path = _str(
+        summary.get("forecast_source_path")
+        or future.get("forecast_source_path")
+        or config.get("paths", {}).get("prepared_forecast_csv")
+        or config.get("paths", {}).get("future_weather_csv")
+        or config.get("paths", {}).get("nwp_forecast_csv")
+    )
     is_diagnostic = _is_diagnostic(
         track=track,
         model_type=model_type,
@@ -131,6 +158,20 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
         backtest_only=backtest_only,
         exp_dir=exp_dir,
         summary=summary,
+        artifact_profile=artifact_profile,
+        forecast_source_path=forecast_source_path,
+        provenance_values=[
+            summary.get("future_features"),
+            summary.get("v4"),
+            summary.get("metadata"),
+            summary.get("provenance"),
+            future,
+            v4_meta,
+            forecast_schema,
+            patch_features,
+            config.get("metadata"),
+            config.get("provenance"),
+        ],
     )
     goal_eligible = bool(not is_diagnostic and rmse_goal is not None and rmse is not None)
     record = ExperimentRecord(
@@ -175,13 +216,11 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
         ),
         forecast_schema_valid=forecast_schema_valid,
         forecast_source_schema_valid=forecast_schema_valid,
-        forecast_source_path=_str(
-            summary.get("forecast_source_path")
-            or future.get("forecast_source_path")
-            or config.get("paths", {}).get("prepared_forecast_csv")
-            or config.get("paths", {}).get("future_weather_csv")
-            or config.get("paths", {}).get("nwp_forecast_csv")
-        ),
+        forecast_archive_adequate=forecast_archive_adequate,
+        forecast_archive_row_count=_int(summary.get("forecast_archive_row_count") or forecast_archive.get("row_count") or forecast_archive.get("rows")),
+        forecast_archive_station_count=_int(summary.get("forecast_archive_station_count") or forecast_archive.get("station_count") or forecast_archive.get("stations")),
+        forecast_archive_issue_time_count=_int(summary.get("forecast_archive_issue_time_count") or forecast_archive.get("issue_time_count") or forecast_archive.get("issue_cycles")),
+        forecast_source_path=forecast_source_path,
         patch_features_enabled=_bool(
             summary.get("uses_patch_features", summary.get("patch_features_enabled", patch_features.get("enabled")))
         ),
@@ -197,6 +236,13 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
             or patch_features.get("feature_set")
             or patch_features.get("name")
         ),
+        backtest_baseline_rmse=_float(summary.get("backtest_baseline_rmse")),
+        operational_gap=_float(summary.get("operational_gap")),
+        operational_gap_status=_str(summary.get("operational_gap_status")),
+        patch_baseline_rmse=_float(summary.get("patch_baseline_rmse")),
+        patch_improvement_rmse=_float(summary.get("patch_improvement_rmse")),
+        patch_improvement_worst_station=_float(summary.get("patch_improvement_worst_station")),
+        patch_improvement_late_horizon=_float(summary.get("patch_improvement_late_horizon")),
         bias_correction_enabled=_bool(bias.get("enabled")) if bias else None,
         bias_correction_mode=_str(bias.get("mode")) if bias else None,
         bias_correction_method=_str(bias.get("method")) if bias else None,
@@ -224,7 +270,8 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
 
 
 def collect_all(root: Path) -> list[ExperimentRecord]:
-    return _mark_main_leaderboard_flags(_mark_representative_runs([collect_experiment(path) for path in find_experiment_dirs(root)]))
+    records = _mark_main_leaderboard_flags(_mark_representative_runs([collect_experiment(path) for path in find_experiment_dirs(root)]))
+    return _annotate_v4_validation_comparisons(records)
 
 
 
@@ -250,6 +297,90 @@ def _v4_stage(exp_dir: Path, summary: dict[str, Any], config: dict[str, Any], fu
     if version.startswith("v3.5") or name.startswith("v3_5"):
         return "v3_5_baseline"
     return "pre_v4"
+
+
+def _annotate_v4_validation_comparisons(records: list[ExperimentRecord]) -> list[ExperimentRecord]:
+    """Attach report-level V4 comparison metrics to records.
+
+    Individual experiments can persist these values in ``experiment_summary.json``.
+    When they do not, the report still computes the most important validation
+    deltas from representative, non-diagnostic records so the HTML/CSV exposes
+    a stable operational-vs-backtest gate.
+    """
+
+    comparison_pool = [
+        record
+        for record in records
+        if record.complete
+        and record.rmse is not None
+        and not record.is_diagnostic
+        and not record.is_alias_artifact
+        and record.is_representative_run
+        and record.target_name == "temp"
+        and record.track == "nwp_assisted_mos"
+    ]
+    backtest_candidates = [record for record in comparison_pool if record.backtest_only is True]
+    backtest_baseline = min(backtest_candidates, key=lambda record: record.rmse or float("inf"), default=None)
+    if backtest_baseline is not None and backtest_baseline.rmse is not None:
+        baseline_rmse = float(backtest_baseline.rmse)
+        for record in records:
+            if (
+                record.operational_valid is True
+                and record.target_name == "temp"
+                and record.track == "nwp_assisted_mos"
+                and record.rmse is not None
+                and not record.is_diagnostic
+                and not record.is_alias_artifact
+                and record.is_representative_run
+                and record.backtest_baseline_rmse is None
+            ):
+                record.backtest_baseline_rmse = baseline_rmse
+                record.operational_gap = float(record.rmse) - baseline_rmse
+                record.operational_gap_status = _operational_gap_status(record.operational_gap)
+
+    no_patch_candidates = [
+        record
+        for record in comparison_pool
+        if record.operational_valid is True
+        and record.uses_patch_features is not True
+        and record.future_feature_source == "prepared_forecast_csv"
+    ]
+    no_patch_baseline = min(no_patch_candidates, key=lambda record: record.rmse or float("inf"), default=None)
+    if no_patch_baseline is not None and no_patch_baseline.rmse is not None:
+        baseline_rmse = float(no_patch_baseline.rmse)
+        baseline_worst_station = no_patch_baseline.worst_station_rmse
+        for record in records:
+            if (
+                record.operational_valid is True
+                and record.target_name == "temp"
+                and record.track == "nwp_assisted_mos"
+                and record.uses_patch_features is True
+                and record.rmse is not None
+                and not record.is_diagnostic
+                and not record.is_alias_artifact
+                and record.is_representative_run
+                and record.patch_baseline_rmse is None
+            ):
+                record.patch_baseline_rmse = baseline_rmse
+                record.patch_improvement_rmse = baseline_rmse - float(record.rmse)
+                if baseline_worst_station is not None and record.worst_station_rmse is not None:
+                    record.patch_improvement_worst_station = float(baseline_worst_station) - float(record.worst_station_rmse)
+                if record.patch_improvement_late_horizon is None and record.worst_horizon_rmse is not None:
+                    # Until per-late-horizon artifacts are available, use the
+                    # worst-horizon delta as a conservative proxy in the report.
+                    if no_patch_baseline.worst_horizon_rmse is not None:
+                        record.patch_improvement_late_horizon = float(no_patch_baseline.worst_horizon_rmse) - float(record.worst_horizon_rmse)
+    return records
+
+
+def _operational_gap_status(gap: float | None) -> str | None:
+    if gap is None:
+        return None
+    if gap <= 0.2:
+        return "very_good"
+    if gap <= 0.5:
+        return "acceptable"
+    return "inspect_nwp_source"
 
 def _load_experiment_config(exp_dir: Path) -> dict[str, Any]:
     """Load V2/V3 unified config, or merge V1 snapshot configs into one view."""
@@ -280,6 +411,8 @@ def _artifact_profile(summary: dict[str, Any], config: dict[str, Any]) -> str:
     profile = str(raw).strip().lower().replace("-", "_")
     if profile in {"minimal", "slim", "lean", "report_only"}:
         return "minimal"
+    if any(token in profile for token in ("synthetic", "generated", "fixture", "smoke", "diagnostic", "oracle")):
+        return profile
     return "full"
 
 
@@ -386,6 +519,25 @@ def _representative_sort_key(record: ExperimentRecord) -> tuple[str, str]:
     return (record.run_timestamp or "", record.created_at_or_modified_at or "")
 
 
+def _string_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        values: list[str] = []
+        for key, child in value.items():
+            values.extend(_string_values(key))
+            values.extend(_string_values(child))
+        return values
+    if isinstance(value, (list, tuple, set)):
+        values = []
+        for child in value:
+            values.extend(_string_values(child))
+        return values
+    if isinstance(value, (str, int, float, bool)):
+        return [str(value)]
+    return []
+
+
 def _rounded(value: float | None) -> float | None:
     if value is None:
         return None
@@ -414,6 +566,9 @@ def _is_diagnostic(
     backtest_only: bool | None,
     exp_dir: Path,
     summary: dict[str, Any],
+    artifact_profile: str,
+    forecast_source_path: str | None,
+    provenance_values: list[Any] | None = None,
 ) -> bool:
     haystack = " ".join(
         str(value).lower()
@@ -421,9 +576,17 @@ def _is_diagnostic(
             track,
             model_type,
             future_feature_source,
+            artifact_profile,
+            forecast_source_path,
+            summary.get("forecast_source_path", ""),
+            summary.get("artifact_profile", ""),
+            exp_dir.parent.name,
             exp_dir.name,
             summary.get("experiment_name", ""),
             summary.get("notes", ""),
+            (summary.get("experiment") or {}).get("name", "") if isinstance(summary.get("experiment"), dict) else "",
+            (summary.get("experiment") or {}).get("notes", "") if isinstance(summary.get("experiment"), dict) else "",
+            *_string_values(provenance_values or []),
         )
     )
     return bool(
@@ -431,6 +594,12 @@ def _is_diagnostic(
         or "oracle" in str(future_feature_source).lower()
         or "oracle" in exp_dir.name.lower()
         or "diagnostic" in haystack
+        or "synthetic" in haystack
+        or "generated" in haystack
+        or "fixture" in haystack
+        or "synthetic_smoke" in haystack
+        or "smoke_test" in haystack
+        or "smoke" in haystack
         or model_type == "decoder_feature_baseline"
         or future_feature_source == "observed_target_oracle"
         or (rmse is not None and float(rmse) == 0.0 and backtest_only is True)
@@ -522,6 +691,12 @@ def _metrics_from_files(exp_dir: Path, summary: dict[str, Any], warnings: list[s
 def _raw_metrics_from_files(exp_dir: Path, summary: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     raw = dict(summary.get("raw_metrics") or {})
     path = exp_dir / "metrics_test.json"
+    raw_path = exp_dir / "metrics_raw_test.json"
+    if raw_path.exists():
+        try:
+            return {**load_json_if_exists(raw_path), **raw}
+        except Exception as exc:
+            warnings.append(f"metrics_raw_test.json parse failed: {exc}")
     if not path.exists():
         return raw
     try:

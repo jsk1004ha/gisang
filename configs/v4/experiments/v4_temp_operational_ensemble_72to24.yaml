@@ -1,0 +1,56 @@
+experiment:
+  name: v4_temp_operational_ensemble_72to24
+  version: v4
+  v4_stage: v4_operational_ensemble
+  notes: >-
+    V4 operational temperature MOS ensemble. Component experiment_dir values must point
+    to operational_valid prepared_forecast_csv component runs; synthetic smoke configs
+    can override them for diagnostic validation only.
+paths:
+  prepared_forecast_csv: data/raw/nwp/prepared_temperature_forecast_20241001_20250228.csv
+data:
+  target_name: temp
+  window:
+    encoder_length: 72
+    prediction_length: 24
+  future_features:
+    track: nwp_assisted_mos
+    source: prepared_forecast_csv
+    operational_valid: true
+    backtest_only: false
+    schema:
+      version: v4-prepared-forecast-v1
+      valid: true
+    weather_columns:
+      - nwp_t2m
+      - nwp_sp
+      - nwp_u10
+      - nwp_v10
+      - nwp_tp
+      - nwp_dew_point
+forecast_schema:
+  version: v4-prepared-forecast-v1
+  valid: true
+v4:
+  stage: v4_operational_ensemble
+model:
+  name: v4_temp_operational_ensemble_72to24
+  type: operational_ensemble
+ensemble:
+  methods:
+    - simple_average
+    - inverse_rmse_weight
+    - horizonwise_linear_weight
+    - constrained_least_squares
+  components:
+    - name: residual_ridge_prepared_nwp
+      experiment_dir: data/artifacts/v4_experiments/REPLACE_WITH_RIDGE_RUN
+    - name: residual_lgbm_prepared_nwp
+      experiment_dir: data/artifacts/v4_experiments/REPLACE_WITH_LGBM_RUN
+    - name: patch_residual_lgbm
+      experiment_dir: data/artifacts/v4_experiments/REPLACE_WITH_PATCH_LGBM_RUN
+    - name: horizonwise_residual_ridge
+      experiment_dir: data/artifacts/v4_experiments/REPLACE_WITH_HORIZONWISE_RIDGE_RUN
+artifacts:
+  root_dir: data/artifacts/v4_experiments
+  profile: minimal
