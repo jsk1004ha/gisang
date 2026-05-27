@@ -61,7 +61,8 @@ def test_extract_nwp_patches_pads_edges_to_keep_patch_shape() -> None:
     assert len(patches) == 9
     assert patches["value"].isna().sum() == 5
     assert patches.loc[(patches["row_offset"] == -1) & (patches["col_offset"] == -1), "lat"].isna().all()
-    assert patches.loc[(patches["row_offset"] == 0) & (patches["col_offset"] == 0), "value"].iloc[0] == pytest.approx(486.0)
+    center_value = patches.loc[(patches["row_offset"] == 0) & (patches["col_offset"] == 0), "value"].iloc[0]
+    assert center_value == pytest.approx(486.0)
 
 
 def test_patches_to_feature_table_summarizes_tree_features_and_precip_coverage() -> None:

@@ -153,7 +153,9 @@ def patches_to_feature_table(
                 "value",
             ]
             finite = values.dropna()
-            row[f"{prefix}_patch_center"] = float(center.iloc[-1]) if not center.empty and pd.notna(center.iloc[-1]) else np.nan
+            row[f"{prefix}_patch_center"] = (
+                float(center.iloc[-1]) if not center.empty and pd.notna(center.iloc[-1]) else np.nan
+            )
             row[f"{prefix}_patch_mean"] = float(finite.mean()) if not finite.empty else np.nan
             row[f"{prefix}_patch_std"] = float(finite.std(ddof=0)) if not finite.empty else np.nan
             row[f"{prefix}_patch_min"] = float(finite.min()) if not finite.empty else np.nan
@@ -182,7 +184,10 @@ def _normalize_grid_frame(grid: pd.DataFrame, *, lat_column: str, lon_column: st
     if valid_time_column is None:
         raise ValueError("NWP grid frame requires one of valid_time, datetime, or timestamp.")
     frame["valid_time"] = pd.to_datetime(frame[valid_time_column], utc=True)
-    issue_time_column = _first_existing_column(frame, ["forecast_init_time", "issue_time", "model_run_time", "run_time", "reference_time"])
+    issue_time_column = _first_existing_column(
+        frame,
+        ["forecast_init_time", "issue_time", "model_run_time", "run_time", "reference_time"],
+    )
     if issue_time_column is not None:
         frame["forecast_init_time"] = pd.to_datetime(frame[issue_time_column], utc=True)
     elif "forecast_init_time" not in frame.columns:
@@ -203,7 +208,12 @@ def _normalize_grid_frame(grid: pd.DataFrame, *, lat_column: str, lon_column: st
     return frame
 
 
-def _normalize_station_frame(stations: pd.DataFrame, *, station_lat_column: str, station_lon_column: str) -> pd.DataFrame:
+def _normalize_station_frame(
+    stations: pd.DataFrame,
+    *,
+    station_lat_column: str,
+    station_lon_column: str,
+) -> pd.DataFrame:
     if stations.empty:
         raise ValueError("Station frame is empty; cannot extract patches.")
     frame = stations.copy()
@@ -248,7 +258,7 @@ def _group_key_values(columns: Sequence[str], keys: Any) -> dict[str, Any]:
     return dict(zip(columns, keys))
 
 
-def _coerce_nullable_int(value: Any) -> int | pd._libs.missing.NAType:  # type: ignore[name-defined]
+def _coerce_nullable_int(value: Any) -> Any:
     if pd.isna(value):
         return pd.NA
     return int(value)
