@@ -100,6 +100,8 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
     )
     if forecast_schema_valid is False:
         warnings.append("forecast_schema_valid=false")
+    if forecast_schema_valid is None and _bool(summary.get("operational_valid", future.get("operational_valid"))) is True:
+        warnings.append("operational_valid requires forecast_schema_valid=true")
     if _unknown_region(exp_dir):
         warnings.append("region_class contains unknown")
     if bias and not bool(bias.get("enabled", False)) and bias.get("disabled_reason"):

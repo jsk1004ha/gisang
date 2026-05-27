@@ -77,7 +77,13 @@ def test_patches_to_feature_table_summarizes_tree_features_and_precip_coverage()
     assert row["nwp_t2m_patch_mean"] == pytest.approx(np.mean([486, 487, 488, 496, 497, 498, 506, 507, 508]))
     assert row["nwp_t2m_patch_min"] == pytest.approx(486.0)
     assert row["nwp_t2m_patch_max"] == pytest.approx(508.0)
+    assert row["nwp_t2m_patch_range"] == pytest.approx(22.0)
+    assert row["nwp_t2m_patch_gradient_x"] == pytest.approx(2.0)
+    assert row["nwp_t2m_patch_gradient_y"] == pytest.approx(20.0)
+    assert row["patch_nwp_t2m_mean"] == pytest.approx(row["nwp_t2m_patch_mean"])
+    assert row["patch_nwp_t2m_gradient_x"] == pytest.approx(row["nwp_t2m_patch_gradient_x"])
     assert row["nwp_tp_patch_coverage_fraction"] == pytest.approx(2 / 9)
+    assert row["patch_nwp_tp_coverage_fraction"] == pytest.approx(2 / 9)
 
 
 def test_extract_nwp_patches_validates_requested_variables_and_patch_size() -> None:

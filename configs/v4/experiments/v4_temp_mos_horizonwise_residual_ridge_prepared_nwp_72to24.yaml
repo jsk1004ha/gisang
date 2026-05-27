@@ -11,6 +11,7 @@ paths:
   base_training_config: configs/v3/experiments/v3_temp_mos_horizonwise_residual_ridge_72to24.yaml
   station_metadata_csv: data/raw/metadata/stations_v2.csv
 data:
+  base_training_config: configs/v3/experiments/v3_temp_mos_horizonwise_residual_ridge_72to24.yaml
   target_name: temp
   min_lead_hour: 1
   window:
@@ -23,7 +24,7 @@ data:
     backtest_only: false
     schema:
       version: v4-prepared-forecast-v1
-      valid: null
+      valid: true
     weather_columns:
       - nwp_t2m
       - nwp_sp
@@ -33,7 +34,7 @@ data:
       - nwp_dew_point
 forecast_schema:
   version: v4-prepared-forecast-v1
-  valid: null
+  valid: true
 v4:
   stage: v4_operational_candidate
 model:

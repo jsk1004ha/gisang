@@ -11,6 +11,7 @@ paths:
   patch_feature_csv: data/processed/v4/patch_features/temp_5x5_summary_v1.csv
   base_training_config: configs/v4/experiments/v4_temp_mos_residual_ridge_prepared_nwp_72to24.yaml
 data:
+  base_training_config: configs/v4/experiments/v4_temp_mos_residual_ridge_prepared_nwp_72to24.yaml
   target_name: temp
   min_lead_hour: 1
   window:
@@ -23,14 +24,21 @@ data:
     backtest_only: false
     schema:
       version: v4-prepared-forecast-v1
-      valid: null
+      valid: true
+    weather_columns:
+      - nwp_t2m
+      - nwp_sp
+      - nwp_u10
+      - nwp_v10
+      - nwp_tp
+      - nwp_dew_point
     patch_features:
       enabled: true
       patch_size: 5
       feature_set: summary_v1
 forecast_schema:
   version: v4-prepared-forecast-v1
-  valid: null
+  valid: true
 patch_features:
   enabled: true
   patch_size: 5

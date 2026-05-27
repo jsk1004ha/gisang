@@ -48,10 +48,11 @@ def build_future_feature_metadata(config: dict[str, Any]) -> dict[str, Any]:
     paths_config = dict(config.get("paths") or {})
     decoder_columns = [str(column) for column in feature_config.get("decoder_known", [])]
     configured_weather_columns = [str(column) for column in future_config.get("weather_columns", [])]
+    nwp_feature_columns = [str(column) for column in feature_config.get("nwp_features", [])]
     weather_columns = sorted(
         {
             column
-            for column in decoder_columns
+            for column in [*decoder_columns, *configured_weather_columns, *nwp_feature_columns]
             if _looks_like_future_weather_feature(column) or column in configured_weather_columns
         }
     )
@@ -147,6 +148,10 @@ def build_future_feature_metadata(config: dict[str, Any]) -> dict[str, Any]:
         or patch_features.get("feature_set")
         or patch_features.get("name")
     )
+    if uses_future_weather and source == "prepared_forecast_csv" and operational_valid and forecast_schema_valid is not True:
+        warnings.append("prepared_forecast_csv operational_valid requires forecast_schema.valid=true after schema validation.")
+        operational_valid = False
+        backtest_only = False
     return {
         "uses_future_weather_features": uses_future_weather,
         "uses_future_nwp_features": uses_future_weather,
@@ -380,6 +385,10 @@ def load_future_weather_archive(path: str | Path, config: dict[str, Any]) -> pd.
     issued after the forecast-init time.
     """
 
+    source = _normalize_source(_future_feature_config(config).get("source", config.get("data", {}).get("future_feature_source")))
+    if source in BACKTEST_FUTURE_FEATURE_SOURCES:
+        raise ValueError("Future weather archive must be issue-time-aligned forecast NWP, not ERA5/reanalysis backtest features.")
+
     frame = read_table(resolve_path(path)).copy()
     if "station_id" not in frame.columns:
         raise ValueError("Future weather archive requires a station_id column.")
@@ -401,11 +410,21 @@ def load_future_weather_archive(path: str | Path, config: dict[str, Any]) -> pd.
         frame["issue_time"] = pd.to_datetime(frame[issue_time_column], utc=True)
     if "lead_hour" not in frame.columns:
         lead = (frame["valid_time"] - frame["issue_time"]) / pd.Timedelta(hours=1)
+        if not np.allclose(lead, np.round(lead)):
+            raise ValueError("Future weather archive lead_hour must be an integer number of hours.")
         frame["lead_hour"] = lead.astype(int)
     else:
         frame["lead_hour"] = frame["lead_hour"].astype(int)
         if "issue_time" not in frame.columns:
             frame["issue_time"] = frame["valid_time"] - pd.to_timedelta(frame["lead_hour"], unit="h")
+    if (frame["lead_hour"] < 0).any():
+        raise ValueError("Future weather archive lead_hour must be non-negative.")
+    expected_valid_time = frame["issue_time"] + pd.to_timedelta(frame["lead_hour"], unit="h")
+    if (frame["valid_time"] != expected_valid_time).any():
+        raise ValueError("Future weather archive valid_time must equal issue_time + lead_hour hours.")
+    duplicate_count = int(frame.duplicated(["station_id", "issue_time", "lead_hour"]).sum())
+    if duplicate_count:
+        raise ValueError(f"Future weather archive contains {duplicate_count} duplicate station/issue_time/lead_hour rows.")
     frame = _add_future_weather_derived_columns(frame)
     return (
         frame.drop_duplicates(["station_id", "issue_time", "valid_time", "lead_hour"])

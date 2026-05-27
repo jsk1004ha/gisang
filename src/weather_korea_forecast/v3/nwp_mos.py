@@ -170,11 +170,11 @@ def run_nwp_mos_experiment(config: dict[str, Any]) -> Path:
 
 def build_nwp_mos_frame(config: dict[str, Any]) -> tuple[pd.DataFrame, list[str], dict[str, Any]]:
     paths = config.get("paths", {})
-    nwp_path = paths.get("nwp_forecast_csv") or paths.get("future_weather_csv")
+    nwp_path = paths.get("nwp_forecast_csv") or paths.get("future_weather_csv") or paths.get("prepared_forecast_csv")
     if not nwp_path:
-        raise ValueError("NWP MOS config requires paths.nwp_forecast_csv or paths.future_weather_csv.")
+        raise ValueError("NWP MOS config requires paths.nwp_forecast_csv, paths.future_weather_csv, or paths.prepared_forecast_csv.")
 
-    base_config_path = config.get("data", {}).get("base_training_config")
+    base_config_path = config.get("data", {}).get("base_training_config") or paths.get("base_training_config")
     if base_config_path:
         base_config = load_yaml(base_config_path)
         observations = load_or_prepare_v2_training_table(base_config)

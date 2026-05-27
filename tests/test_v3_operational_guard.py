@@ -121,8 +121,13 @@ def test_prepared_forecast_csv_metadata_can_be_operational_valid() -> None:
     metadata = build_future_feature_metadata(
         {
             "data": {
-                "features": {"decoder_known": ["era5_t2m", "era5_sp"]},
-                "future_features": {"source": "prepared_forecast_csv", "track": "nwp_assisted_mos"},
+                "features": {"nwp_features": ["nwp_t2m", "nwp_sp"]},
+                "future_features": {
+                    "source": "prepared_forecast_csv",
+                    "track": "nwp_assisted_mos",
+                    "schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+                    "weather_columns": ["nwp_t2m", "nwp_sp"],
+                },
             }
         }
     )
@@ -131,3 +136,24 @@ def test_prepared_forecast_csv_metadata_can_be_operational_valid() -> None:
     assert metadata["future_feature_source"] == "prepared_forecast_csv"
     assert metadata["operational_valid"] is True
     assert metadata["backtest_only"] is False
+    assert metadata["forecast_schema_valid"] is True
+
+
+def test_prepared_forecast_csv_metadata_requires_valid_schema_for_operational_flag() -> None:
+    metadata = build_future_feature_metadata(
+        {
+            "data": {
+                "features": {"nwp_features": ["nwp_t2m"]},
+                "future_features": {
+                    "source": "prepared_forecast_csv",
+                    "track": "nwp_assisted_mos",
+                    "operational_valid": True,
+                    "weather_columns": ["nwp_t2m"],
+                },
+            }
+        }
+    )
+
+    assert metadata["uses_future_weather_features"] is True
+    assert metadata["operational_valid"] is False
+    assert any("forecast_schema.valid=true" in warning for warning in metadata["warnings"])

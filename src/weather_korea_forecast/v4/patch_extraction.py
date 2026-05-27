@@ -153,17 +153,42 @@ def patches_to_feature_table(
                 "value",
             ]
             finite = values.dropna()
-            row[f"{prefix}_patch_center"] = (
+            patch_center = (
                 float(center.iloc[-1]) if not center.empty and pd.notna(center.iloc[-1]) else np.nan
             )
-            row[f"{prefix}_patch_mean"] = float(finite.mean()) if not finite.empty else np.nan
-            row[f"{prefix}_patch_std"] = float(finite.std(ddof=0)) if not finite.empty else np.nan
-            row[f"{prefix}_patch_min"] = float(finite.min()) if not finite.empty else np.nan
-            row[f"{prefix}_patch_max"] = float(finite.max()) if not finite.empty else np.nan
+            patch_mean = float(finite.mean()) if not finite.empty else np.nan
+            patch_std = float(finite.std(ddof=0)) if not finite.empty else np.nan
+            patch_min = float(finite.min()) if not finite.empty else np.nan
+            patch_max = float(finite.max()) if not finite.empty else np.nan
+            patch_range = patch_max - patch_min if pd.notna(patch_max) and pd.notna(patch_min) else np.nan
+            gradient_x = _patch_axis_gradient(variable_rows, axis="col_offset")
+            gradient_y = _patch_axis_gradient(variable_rows, axis="row_offset")
+            for feature_name, feature_value in {
+                "center": patch_center,
+                "mean": patch_mean,
+                "std": patch_std,
+                "min": patch_min,
+                "max": patch_max,
+                "range": patch_range,
+                "gradient_x": gradient_x,
+                "gradient_y": gradient_y,
+            }.items():
+                row[f"{prefix}_patch_{feature_name}"] = feature_value
+                row[f"patch_{prefix}_{feature_name}"] = feature_value
             if str(variable) in precip_names or _looks_like_precipitation(str(variable)):
-                row[f"{prefix}_patch_coverage_fraction"] = float((finite > 0.0).mean()) if not finite.empty else np.nan
+                coverage = float((finite > 0.0).mean()) if not finite.empty else np.nan
+                row[f"{prefix}_patch_coverage_fraction"] = coverage
+                row[f"patch_{prefix}_coverage_fraction"] = coverage
         output_rows.append(row)
     return pd.DataFrame(output_rows)
+
+
+def _patch_axis_gradient(variable_rows: pd.DataFrame, *, axis: str) -> float:
+    positive = pd.to_numeric(variable_rows.loc[variable_rows[axis].astype(int).eq(1), "value"], errors="coerce").dropna()
+    negative = pd.to_numeric(variable_rows.loc[variable_rows[axis].astype(int).eq(-1), "value"], errors="coerce").dropna()
+    if positive.empty or negative.empty:
+        return np.nan
+    return float(positive.mean() - negative.mean())
 
 
 def _validate_patch_size(patch_size: int) -> None:

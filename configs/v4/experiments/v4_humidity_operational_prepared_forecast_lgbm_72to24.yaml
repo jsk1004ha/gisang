@@ -10,6 +10,7 @@ paths:
   base_training_config: configs/v3/experiments/v3_5_humidity_prepared_forecast_rh_residual_lgbm_72to24.yaml
   station_metadata_csv: data/raw/metadata/stations_v2.csv
 data:
+  base_training_config: configs/v3/experiments/v3_5_humidity_prepared_forecast_rh_residual_lgbm_72to24.yaml
   target_name: humidity
   min_lead_hour: 1
   window:
@@ -21,7 +22,7 @@ data:
     backtest_only: false
     schema:
       version: v4-prepared-forecast-v1
-      valid: null
+      valid: true
     weather_columns:
       - nwp_relative_humidity_2m
       - nwp_temp_2m_c
@@ -32,7 +33,7 @@ data:
       - nwp_total_precipitation
 forecast_schema:
   version: v4-prepared-forecast-v1
-  valid: null
+  valid: true
 v4:
   stage: v4_operational_candidate
 model:

@@ -100,6 +100,27 @@ def test_load_future_weather_archive_maps_nwp_humidity_aliases(tmp_path: Path) -
     assert "datetime" in archive.columns
 
 
+def test_load_future_weather_archive_rejects_bad_lead_alignment(tmp_path: Path) -> None:
+    forecast_path = tmp_path / "bad_gfs.csv"
+    pd.DataFrame(
+        [
+            {
+                "station_id": "108",
+                "issue_time": "2024-01-01T00:00:00Z",
+                "valid_time": "2024-01-01T03:00:00Z",
+                "lead_hour": 2,
+                "gfs_temp_2m_c": 10.0,
+            }
+        ]
+    ).to_csv(forecast_path, index=False)
+
+    with pytest.raises(ValueError, match="valid_time must equal issue_time"):
+        load_future_weather_archive(
+            forecast_path,
+            {"data": {"future_features": {"source": "gfs_forecast", "operational_valid": True}}},
+        )
+
+
 def test_nwp_mos_trains_issue_time_aligned_residual_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     observations = _synthetic_observation_frame()
     forecast_path = _synthetic_nwp_archive(observations, tmp_path / "nwp.csv")
