@@ -14,6 +14,7 @@ from weather_korea_forecast.utils.config import load_yaml
 from weather_korea_forecast.utils.io import write_json, write_table
 from weather_korea_forecast.utils.paths import resolve_path
 from weather_korea_forecast.v2.future_features import build_future_feature_metadata
+from weather_korea_forecast.service.export_forecast import is_blocked_provenance
 
 KEY_COLUMNS = ["station_id", "issue_time", "timestamp", "horizon_step", "target_name"]
 SUPPORTED_METHODS = ["simple_average", "inverse_rmse_weight", "horizonwise_linear_weight", "constrained_least_squares"]
@@ -70,6 +71,10 @@ def run_operational_ensemble(config: dict[str, Any]) -> Path:
         "forecast_schema_version": metadata.get("forecast_schema_version"),
         "forecast_schema_valid": metadata.get("forecast_schema_valid"),
         "forecast_source_schema_valid": metadata.get("forecast_source_schema_valid"),
+        "forecast_archive_adequate": metadata.get("forecast_archive_adequate"),
+        "forecast_archive_row_count": metadata.get("forecast_archive_row_count"),
+        "forecast_archive_station_count": metadata.get("forecast_archive_station_count"),
+        "forecast_archive_issue_time_count": metadata.get("forecast_archive_issue_time_count"),
         "forecast_source_path": metadata.get("forecast_source_path"),
         "v4_stage": config.get("experiment", {}).get("v4_stage", "v4_operational_ensemble"),
         "ensemble_method": selected["method"],
@@ -135,6 +140,14 @@ def _audit_components(components: list[dict[str, Any]], config: dict[str, Any]) 
                 "forecast_source_schema_valid",
                 summary.get("forecast_schema_valid", future.get("forecast_source_schema_valid", future.get("forecast_schema_valid"))),
             ),
+            "forecast_archive_adequate": summary.get(
+                "forecast_archive_adequate",
+                summary.get("real_forecast_archive_adequate", future.get("forecast_archive_adequate", (future.get("archive") or {}).get("adequate") if isinstance(future.get("archive"), dict) else None)),
+            ),
+            "forecast_source_path": summary.get(
+                "forecast_source_path",
+                future.get("forecast_source_path", future.get("prepared_forecast_archive", future.get("prepared_forecast_csv"))),
+            ),
             "diagnostic": _looks_diagnostic(component, summary),
             "valid": True,
             "reasons": [],
@@ -157,7 +170,13 @@ def _audit_components(components: list[dict[str, Any]], config: dict[str, Any]) 
         if row["forecast_source_schema_valid"] is not True:
             row["valid"] = False
             row["reasons"].append("forecast schema is not valid")
-        if row["diagnostic"] and not allow_diagnostic:
+        if row["forecast_archive_adequate"] is not True:
+            row["valid"] = False
+            row["reasons"].append("forecast archive is not adequate")
+        if not row["forecast_source_path"]:
+            row["valid"] = False
+            row["reasons"].append("forecast source path is missing")
+        if row["diagnostic"]:
             row["valid"] = False
             row["reasons"].append("diagnostic component is not allowed")
         rows.append(row)
@@ -208,7 +227,9 @@ def _looks_diagnostic(component: dict[str, Any], summary: dict[str, Any]) -> boo
             experiment.get("notes", ""),
         )
     )
-    return "diagnostic" in haystack or "synthetic_smoke" in haystack or "oracle" in haystack
+    return is_blocked_provenance(summary) or any(
+        token in haystack for token in ("diagnostic", "synthetic", "smoke", "fixture", "generated", "oracle")
+    )
 
 
 def _read_prediction(component: dict[str, Any], split: str, *, expected_target: str) -> pd.DataFrame:

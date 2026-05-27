@@ -117,7 +117,7 @@ def test_prepared_forecast_csv_adapter_returns_v4_schema_fields_from_aliases(tmp
     assert pd.Timestamp(features.loc[0, "issue_time"]) == pd.Timestamp("2023-12-31T18:00:00Z")
 
 
-def test_prepared_forecast_csv_metadata_can_be_operational_valid() -> None:
+def test_prepared_forecast_csv_metadata_requires_archive_adequacy_for_operational_valid() -> None:
     metadata = build_future_feature_metadata(
         {
             "data": {
@@ -134,9 +134,57 @@ def test_prepared_forecast_csv_metadata_can_be_operational_valid() -> None:
 
     assert metadata["uses_future_weather_features"] is True
     assert metadata["future_feature_source"] == "prepared_forecast_csv"
+    assert metadata["operational_valid"] is False
+    assert metadata["backtest_only"] is False
+    assert metadata["forecast_schema_valid"] is True
+    assert any("forecast_archive_adequate=true" in warning for warning in metadata["warnings"])
+
+
+def test_prepared_forecast_csv_metadata_can_be_operational_valid_with_adequate_archive() -> None:
+    metadata = build_future_feature_metadata(
+        {
+            "data": {
+                "features": {"nwp_features": ["nwp_t2m", "nwp_sp"]},
+                "future_features": {
+                    "source": "prepared_forecast_csv",
+                    "track": "nwp_assisted_mos",
+                    "schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+                    "archive": {"adequate": True, "row_count": 14400, "station_count": 20, "issue_time_count": 30},
+                    "weather_columns": ["nwp_t2m", "nwp_sp"],
+                },
+            },
+            "paths": {"prepared_forecast_archive": "data/raw/nwp/archive/prepared_forecast_archive.csv"},
+        }
+    )
+
+    assert metadata["uses_future_weather_features"] is True
+    assert metadata["future_feature_source"] == "prepared_forecast_csv"
+    assert metadata["forecast_source_path"] == "data/raw/nwp/archive/prepared_forecast_archive.csv"
     assert metadata["operational_valid"] is True
     assert metadata["backtest_only"] is False
     assert metadata["forecast_schema_valid"] is True
+    assert metadata["forecast_archive_adequate"] is True
+
+
+def test_prepared_forecast_csv_metadata_requires_source_path_for_operational_valid() -> None:
+    metadata = build_future_feature_metadata(
+        {
+            "data": {
+                "features": {"nwp_features": ["nwp_t2m", "nwp_sp"]},
+                "future_features": {
+                    "source": "prepared_forecast_csv",
+                    "track": "nwp_assisted_mos",
+                    "schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+                    "archive": {"adequate": True, "row_count": 14400, "station_count": 20, "issue_time_count": 30},
+                    "weather_columns": ["nwp_t2m", "nwp_sp"],
+                },
+            }
+        }
+    )
+
+    assert metadata["operational_valid"] is False
+    assert metadata["forecast_archive_adequate"] is True
+    assert any("forecast_source_path" in warning for warning in metadata["warnings"])
 
 
 def test_prepared_forecast_csv_metadata_requires_valid_schema_for_operational_flag() -> None:

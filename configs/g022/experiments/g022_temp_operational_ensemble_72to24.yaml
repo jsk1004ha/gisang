@@ -1,0 +1,54 @@
+experiment:
+  name: g022_temp_operational_ensemble_72to24
+  version: g022
+  v4_stage: g022_operational_ensemble
+  notes: >-
+    G022 operational ensemble. Components must be trusted prepared-forecast archive runs;
+    untrusted backtest or non-production components are rejected by operational_ensemble audit.
+paths:
+  prepared_forecast_archive: data/raw/nwp/archive/prepared_forecast_archive.csv
+  archive_quality_report: data/raw/nwp/archive/archive_quality_report.json
+data:
+  target_name: temp
+  window:
+    encoder_length: 72
+    prediction_length: 24
+  future_features:
+    track: nwp_assisted_mos
+    source: prepared_forecast_csv
+    operational_valid: null
+    backtest_only: false
+    schema:
+      version: v4-prepared-forecast-v1
+      valid: true
+    archive:
+      required: true
+      adequate: null
+forecast_schema:
+  version: v4-prepared-forecast-v1
+  valid: true
+forecast_archive:
+  required: true
+  adequate: null
+  quality_report: data/raw/nwp/archive/archive_quality_report.json
+model:
+  name: g022_temp_operational_ensemble_72to24
+  type: operational_ensemble
+ensemble:
+  methods:
+    - simple_average
+    - inverse_rmse_weight
+    - horizonwise_linear_weight
+    - constrained_least_squares
+  components:
+    - name: residual_ridge
+      experiment_dir: data/artifacts/g022_experiments/REPLACE_WITH_G022_RIDGE_RUN
+    - name: residual_lgbm
+      experiment_dir: data/artifacts/g022_experiments/REPLACE_WITH_G022_LGBM_RUN
+    - name: patch_residual_lgbm
+      experiment_dir: data/artifacts/g022_experiments/REPLACE_WITH_G022_PATCH_RUN
+    - name: horizonwise_lgbm
+      experiment_dir: data/artifacts/g022_experiments/REPLACE_WITH_G022_HORIZONWISE_RUN
+artifacts:
+  root_dir: data/artifacts/g022_experiments
+  profile: minimal

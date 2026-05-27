@@ -20,6 +20,7 @@ def _files(tmp_path: Path, *, operational_valid: bool = False, backtest_only: bo
         "backtest_only": backtest_only,
         "forecast_source_schema_valid": operational_valid,
         "forecast_archive_adequate": operational_valid,
+        "forecast_source_path": str(forecast) if operational_valid else None,
         "metrics": {"rmse": 1.2},
     }
     (exp / "experiment_summary.json").write_text(json.dumps(summary), encoding="utf-8")

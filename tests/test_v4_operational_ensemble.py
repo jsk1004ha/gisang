@@ -18,6 +18,8 @@ def _write_component(
     backtest_only: bool = False,
     future_feature_source: str = "prepared_forecast_csv",
     schema_valid: bool = True,
+    archive_adequate: bool = True,
+    forecast_source_path: str | None = "data/raw/nwp/archive/prepared_forecast_archive.csv",
     diagnostic: bool = False,
     drop_last_test_row: bool = False,
     actual_offset: float = 0.0,
@@ -59,6 +61,8 @@ def _write_component(
         "operational_valid": operational_valid,
         "backtest_only": backtest_only,
         "forecast_source_schema_valid": schema_valid,
+        "forecast_archive_adequate": archive_adequate,
+        "forecast_source_path": forecast_source_path,
         "metrics": {"test": {"rmse": abs(offset), "mae": abs(offset), "bias": offset}},
     }
     if target_name is not None:
@@ -79,6 +83,7 @@ def _ensemble_config(tmp_path: Path, components: list[Path]) -> dict:
                 "operational_valid": True,
                 "backtest_only": False,
                 "schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+                "archive": {"adequate": True, "row_count": 14400, "station_count": 20, "issue_time_count": 30},
                 "weather_columns": ["nwp_t2m"],
             },
         },
@@ -121,6 +126,8 @@ def test_operational_ensemble_writes_weights_metrics_predictions_and_audit(tmp_p
         ({"backtest_only": None}, "backtest_only is not explicitly false"),
         ({"future_feature_source": "era5_reanalysis"}, "future_feature_source"),
         ({"schema_valid": False}, "forecast schema is not valid"),
+        ({"archive_adequate": False}, "forecast archive is not adequate"),
+        ({"forecast_source_path": None}, "forecast source path is missing"),
         ({"diagnostic": True}, "diagnostic component is not allowed"),
         ({"target_name": None}, "target_name is missing"),
         ({"target_name": "humidity"}, "target_name"),
@@ -132,6 +139,16 @@ def test_operational_ensemble_rejects_invalid_component_provenance(tmp_path: Pat
 
     with pytest.raises(ValueError, match=match):
         run_operational_ensemble(_ensemble_config(tmp_path, [c1, c2]))
+
+
+def test_operational_ensemble_rejects_diagnostic_even_when_config_allows_it(tmp_path: Path) -> None:
+    c1 = _write_component(tmp_path, "ridge", 0.4)
+    c2 = _write_component(tmp_path, "diagnostic_component", 0.05, diagnostic=True)
+    config = _ensemble_config(tmp_path, [c1, c2])
+    config["ensemble"]["allow_diagnostic_components"] = True
+
+    with pytest.raises(ValueError, match="diagnostic component is not allowed"):
+        run_operational_ensemble(config)
 
 
 def test_operational_ensemble_rejects_component_key_coverage_mismatch(tmp_path: Path) -> None:

@@ -111,6 +111,7 @@ def _trusted_metadata_value(metadata: dict[str, Any], *keys: str) -> Any:
 
 def _validate_operational_metadata(metadata: dict[str, Any]) -> str:
     source_from_metadata = str(_trusted_metadata_value(metadata, "future_feature_source", "source") or "")
+    forecast_source_path = _trusted_metadata_value(metadata, "forecast_source_path", "prepared_forecast_archive", "prepared_forecast_csv")
     checks = {
         "trusted future_feature_source=prepared_forecast_csv": source_from_metadata == "prepared_forecast_csv",
         "trusted operational_valid=true": _metadata_bool(metadata, "operational_valid") is True,
@@ -119,6 +120,7 @@ def _validate_operational_metadata(metadata: dict[str, Any]) -> str:
         or _metadata_bool(metadata, "forecast_schema_valid") is True,
         "trusted forecast_archive_adequate=true": _metadata_bool(metadata, "forecast_archive_adequate") is True
         or _metadata_bool(metadata, "real_forecast_archive_adequate") is True,
+        "trusted forecast_source_path present": bool(forecast_source_path),
     }
     checks["not diagnostic/smoke/synthetic"] = not is_blocked_provenance(metadata)
     missing = [name for name, ok in checks.items() if not ok]

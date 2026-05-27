@@ -122,14 +122,26 @@ def build_future_feature_metadata(config: dict[str, Any]) -> dict[str, Any]:
         config.get("forecast_schema"),
         config.get("v4", {}).get("forecast_schema") if isinstance(config.get("v4"), dict) else {},
     )
+    forecast_archive = _merge_metadata_dicts(
+        future_config.get("archive"),
+        config.get("forecast_archive"),
+        config.get("v4", {}).get("forecast_archive") if isinstance(config.get("v4"), dict) else {},
+    )
     forecast_schema_valid = _coerce_optional_bool(
         future_config.get(
             "forecast_source_schema_valid",
             config.get("forecast_source_schema_valid", forecast_schema.get("valid", forecast_schema.get("schema_valid"))),
         )
     )
+    forecast_archive_adequate = _coerce_optional_bool(
+        future_config.get(
+            "forecast_archive_adequate",
+            config.get("forecast_archive_adequate", forecast_archive.get("adequate", forecast_archive.get("real_archive_adequate"))),
+        )
+    )
     forecast_source_path = (
         future_config.get("forecast_source_path")
+        or paths_config.get("prepared_forecast_archive")
         or paths_config.get("prepared_forecast_csv")
         or paths_config.get("future_weather_csv")
         or paths_config.get("nwp_forecast_csv")
@@ -152,6 +164,14 @@ def build_future_feature_metadata(config: dict[str, Any]) -> dict[str, Any]:
         warnings.append("prepared_forecast_csv operational_valid requires forecast_schema.valid=true after schema validation.")
         operational_valid = False
         backtest_only = False
+    if uses_future_weather and source == "prepared_forecast_csv" and operational_valid and forecast_archive_adequate is not True:
+        warnings.append("prepared_forecast_csv operational_valid requires forecast_archive_adequate=true from a real archive quality report.")
+        operational_valid = False
+        backtest_only = False
+    if uses_future_weather and source == "prepared_forecast_csv" and operational_valid and not forecast_source_path:
+        warnings.append("prepared_forecast_csv operational_valid requires a trusted forecast_source_path/prepared_forecast_archive path.")
+        operational_valid = False
+        backtest_only = False
     return {
         "uses_future_weather_features": uses_future_weather,
         "uses_future_nwp_features": uses_future_weather,
@@ -163,6 +183,11 @@ def build_future_feature_metadata(config: dict[str, Any]) -> dict[str, Any]:
         "forecast_schema_version": forecast_schema.get("version") or forecast_schema.get("schema_version"),
         "forecast_schema_valid": forecast_schema_valid,
         "forecast_source_schema_valid": forecast_schema_valid,
+        "forecast_archive": forecast_archive,
+        "forecast_archive_adequate": forecast_archive_adequate,
+        "forecast_archive_row_count": _coerce_optional_int(forecast_archive.get("row_count", forecast_archive.get("rows"))),
+        "forecast_archive_station_count": _coerce_optional_int(forecast_archive.get("station_count", forecast_archive.get("stations"))),
+        "forecast_archive_issue_time_count": _coerce_optional_int(forecast_archive.get("issue_time_count", forecast_archive.get("issue_cycles"))),
         "forecast_source_path": str(forecast_source_path) if forecast_source_path else None,
         "uses_patch_features": uses_patch_features,
         "patch_features_enabled": uses_patch_features,

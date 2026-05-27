@@ -1,0 +1,89 @@
+experiment:
+  name: g022_temp_operational_patch3_lgbm_72to24
+  version: g022
+  v4_stage: g022_performance_sprint
+  notes: >-
+    G022 operational temperature MOS performance sprint config. 3x3 patch summary ablation against no-patch operational baseline.
+paths:
+  prepared_forecast_archive: data/raw/nwp/archive/prepared_forecast_archive.csv
+  archive_quality_report: data/raw/nwp/archive/archive_quality_report.json
+  base_training_config: configs/v3/experiments/v3_temp_mos_residual_lgbm_72to24.yaml
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+data:
+  target_name: temp
+  min_lead_hour: 1
+  window:
+    encoder_length: 72
+    prediction_length: 24
+  future_features:
+    track: nwp_assisted_mos
+    source: prepared_forecast_csv
+    operational_valid: null
+    backtest_only: false
+    schema:
+      version: v4-prepared-forecast-v1
+      valid: true
+    archive:
+      required: true
+      adequate: null
+      quality_report: data/raw/nwp/archive/archive_quality_report.json
+      min_stations: 20
+      min_issue_cycles: 30
+      min_horizon_coverage: 0.95
+    weather_columns:
+      - nwp_t2m
+      - nwp_sp
+      - nwp_u10
+      - nwp_v10
+      - nwp_tp
+      - nwp_dew_point
+  residual_target:
+    baseline: nwp_t2m_c
+    residual: observed_temp_minus_nwp_t2m_c
+    final: nwp_t2m_c_plus_predicted_residual
+forecast_schema:
+  version: v4-prepared-forecast-v1
+  valid: true
+forecast_archive:
+  required: true
+  adequate: null
+  quality_report: data/raw/nwp/archive/archive_quality_report.json
+v4:
+  stage: g022_performance_sprint
+patch_features:
+  enabled: true
+  patch_size: 3
+  feature_mode: summary
+  variables: [nwp_t2m, nwp_sp, nwp_u10, nwp_v10, nwp_tp, nwp_dew_point]
+model:
+  name: g022_temp_operational_patch3_lgbm_72to24
+  type: lightgbm
+  residual: true
+  baseline_column: nwp_t2m_c
+  params:
+    n_estimators: 1000
+    learning_rate: 0.03
+    num_leaves: 63
+    min_child_samples: 20
+    random_state: 20260527
+    n_jobs: 8
+evaluation:
+  bias_correction:
+    enabled: true
+    mode: auto
+    candidate_modes:
+      - per_horizon
+      - per_station_horizon
+      - per_region_horizon
+      - per_station_month_hour
+    candidate_methods:
+      - mean_bias
+      - affine
+      - quantile
+    calibration_fraction: 0.5
+    selection_metric: rmse
+ensemble:
+  enabled: false
+artifacts:
+  root_dir: data/artifacts/g022_experiments
+  profile: minimal

@@ -1,0 +1,73 @@
+experiment:
+  name: g022_humidity_with_predicted_temp_lgbm_72to24
+  version: g022
+  v4_stage: g022_humidity_performance
+  notes: >-
+    G022 humidity performance sprint config using fixed dew point units,
+    time features, predicted temperature inputs, and RH clipping.
+paths:
+  prepared_forecast_archive: data/raw/nwp/archive/prepared_forecast_archive.csv
+  archive_quality_report: data/raw/nwp/archive/archive_quality_report.json
+  base_training_config: configs/v3/experiments/v3_humidity_direct_lgbm_72to24.yaml
+  predicted_temp_forecast_csv: data/artifacts/g022_experiments/REPLACE_WITH_TEMP_PREDICTIONS/predictions_test.csv
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+data:
+  target_name: humidity
+  humidity_target_mode: direct_rh_with_predicted_temp
+  window:
+    encoder_length: 72
+    prediction_length: 24
+  feature_sanity:
+    fix_dew_point_units: true
+    kelvin_to_celsius_threshold: 150
+    require_time_features: [hour_sin, hour_cos, doy_sin, doy_cos]
+    predicted_temp_horizon: true
+    rh_clip: [0, 100]
+    dry_threshold: 30
+    humid_threshold: 80
+  features:
+    required:
+      - era5_t2m_c
+      - era5_dew_point_c
+      - era5_dew_point_depression
+      - hour_sin
+      - hour_cos
+      - doy_sin
+      - doy_cos
+      - predicted_temp_horizon
+  future_features:
+    track: nwp_assisted_mos
+    source: prepared_forecast_csv
+    operational_valid: null
+    backtest_only: false
+    schema:
+      version: v4-prepared-forecast-v1
+      valid: true
+    archive:
+      required: true
+      adequate: null
+forecast_schema:
+  version: v4-prepared-forecast-v1
+  valid: true
+forecast_archive:
+  required: true
+  adequate: null
+model:
+  name: g022_humidity_with_predicted_temp_lgbm_72to24
+  type: lightgbm
+  params:
+    n_estimators: 1200
+    learning_rate: 0.025
+    num_leaves: 127
+    min_child_samples: 20
+    subsample: 0.9
+    colsample_bytree: 0.9
+    random_state: 20260527
+    n_jobs: 8
+postprocess:
+  restore_relative_humidity: direct_rh
+  clip_prediction: [0, 100]
+  calibration: none
+artifacts:
+  root_dir: data/artifacts/g022_experiments
+  profile: minimal

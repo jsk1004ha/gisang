@@ -9,6 +9,7 @@ from typing import Iterable
 
 from weather_korea_forecast.reporting.plot_embed import embed_image_tag
 from weather_korea_forecast.reporting.schema import PLOT_FILES, ExperimentRecord
+from weather_korea_forecast.reporting.site_readiness import evaluate_site_readiness
 
 
 _BADGE_CLASS = {
@@ -65,6 +66,7 @@ def render_report(
   {kpis}
   {_readiness_section(records, main_records)}
   {_v4_validation_section(records, main_records)}
+  {_g022_performance_section(records, main_records)}
   {_v4_c_gate_section(main_records)}
   <section class=\"card\">
     <h2>리더보드</h2>
@@ -455,6 +457,55 @@ def _is_trusted_v4_operational_forecast_record(record: ExperimentRecord) -> bool
     ).lower()
     return not any(token in provenance_text for token in blocked_tokens)
 
+
+def _g022_performance_section(all_records: list[ExperimentRecord], main_records: list[ExperimentRecord]) -> str:
+    def is_g022(record: ExperimentRecord) -> bool:
+        return (
+            str(record.version).lower() == "g022"
+            or str(record.v4_stage).startswith("g022")
+            or str(record.experiment_name).startswith("g022_")
+        )
+
+    g022_records = [r for r in all_records if is_g022(r)]
+    g022_main_records = [r for r in main_records if is_g022(r)]
+    operational_temp = [
+        r for r in g022_main_records
+        if _is_trusted_v4_operational_forecast_record(r) and r.rmse is not None
+    ]
+    backtest_temp = [
+        r for r in g022_main_records
+        if r.target_name == "temp" and r.track == "nwp_assisted_mos" and r.backtest_only is True and r.rmse is not None
+    ]
+    humidity = [r for r in g022_main_records if r.target_name == "humidity" and r.rmse is not None]
+    best_operational = min(operational_temp, key=lambda r: r.rmse or float("inf"), default=None)
+    best_backtest = min(backtest_temp, key=lambda r: r.rmse or float("inf"), default=None)
+    best_humidity = min(humidity, key=lambda r: r.rmse or float("inf"), default=None)
+    calibration = [r for r in g022_main_records if r.bias_correction_accepted is True or r.bias_correction_enabled is True]
+    ensemble = [r for r in g022_main_records if "ensemble" in str(r.model_type).lower() or "ensemble" in str(r.experiment_name).lower()]
+    patch = [r for r in g022_main_records if r.uses_patch_features is True]
+    readiness = evaluate_site_readiness(g022_main_records)
+    gap = None
+    if best_operational and best_backtest and best_operational.rmse is not None and best_backtest.rmse is not None:
+        gap = float(best_operational.rmse) - float(best_backtest.rmse)
+    metrics = {
+        "G022 experiment count": len(g022_records),
+        "operational temp best model": best_operational.experiment_name if best_operational else "n/a",
+        "operational temp best RMSE": best_operational.rmse if best_operational else None,
+        "backtest best RMSE": best_backtest.rmse if best_backtest else None,
+        "operational gap vs backtest": gap,
+        "patch ablation runs": len(patch),
+        "calibration candidate runs": len(calibration),
+        "ensemble candidate runs": len(ensemble),
+        "humidity best honest model": best_humidity.experiment_name if best_humidity else "n/a",
+        "humidity best honest RMSE": best_humidity.rmse if best_humidity else None,
+        "site readiness status": readiness.status,
+        "site readiness missing": ", ".join(readiness.missing_conditions) if readiness.missing_conditions else "none",
+    }
+    return f"""<section class="card g022-performance">
+      <h2>G022 Model Performance Sprint</h2>
+      <p class="muted">기능 추가보다 성능 개선을 추적합니다. real NWP archive가 부족하면 operational RMSE를 계산하지 않고 gate를 WARN/FAIL로 유지합니다.</p>
+      <dl>{_dl(metrics)}</dl>
+    </section>"""
 
 def _v4_c_gate_section(main_records: list[ExperimentRecord]) -> str:
     operational_temp = [r for r in main_records if _is_trusted_v4_operational_forecast_record(r)]

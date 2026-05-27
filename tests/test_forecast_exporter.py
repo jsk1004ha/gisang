@@ -88,6 +88,7 @@ def test_operational_export_requires_trusted_summary_source(tmp_path: Path):
                 "backtest_only": False,
                 "forecast_source_schema_valid": True,
                 "forecast_archive_adequate": True,
+                "forecast_source_path": "data/raw/nwp/archive/prepared_forecast_archive.csv",
             }
         ),
         encoding="utf-8",
@@ -106,6 +107,35 @@ def test_operational_export_requires_trusted_summary_source(tmp_path: Path):
         )
 
 
+def test_operational_export_requires_trusted_forecast_source_path(tmp_path: Path):
+    pred, meta = _inputs(tmp_path)
+    summary = tmp_path / "summary.json"
+    summary.write_text(
+        json.dumps(
+            {
+                "future_feature_source": "prepared_forecast_csv",
+                "operational_valid": True,
+                "backtest_only": False,
+                "forecast_source_schema_valid": True,
+                "forecast_archive_adequate": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ForecastExportError, match="forecast_source_path"):
+        export_forecast(
+            predictions_path=pred,
+            station_metadata_path=meta,
+            output_dir=tmp_path / "forecasts",
+            forecast_run_id="run-path",
+            source="prepared_forecast_csv",
+            operational_valid=True,
+            backtest_only=False,
+            trusted_experiment_summary_path=summary,
+        )
+
+
 def test_operational_export_requires_explicit_backtest_false(tmp_path: Path):
     pred, meta = _inputs(tmp_path)
     summary = tmp_path / "summary.json"
@@ -117,6 +147,7 @@ def test_operational_export_requires_explicit_backtest_false(tmp_path: Path):
                 "backtest_only": None,
                 "forecast_source_schema_valid": True,
                 "forecast_archive_adequate": True,
+                "forecast_source_path": "data/raw/nwp/archive/prepared_forecast_archive.csv",
             }
         ),
         encoding="utf-8",
@@ -176,6 +207,7 @@ def test_operational_export_rejects_caller_source_conflict(tmp_path: Path):
                 "backtest_only": False,
                 "forecast_source_schema_valid": True,
                 "forecast_archive_adequate": True,
+                "forecast_source_path": "data/raw/nwp/archive/prepared_forecast_archive.csv",
             }
         ),
         encoding="utf-8",
@@ -205,6 +237,7 @@ def test_operational_export_writes_trusted_source_fields(tmp_path: Path):
                 "backtest_only": False,
                 "forecast_source_schema_valid": True,
                 "forecast_archive_adequate": True,
+                "forecast_source_path": "data/raw/nwp/archive/prepared_forecast_archive.csv",
             }
         ),
         encoding="utf-8",
