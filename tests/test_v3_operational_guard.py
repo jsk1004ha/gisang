@@ -69,7 +69,7 @@ def test_prepared_forecast_csv_adapter_enforces_v4_issue_and_horizon_alignment(t
             }
         ]
     ).to_csv(path, index=False)
-    with pytest.raises(ValueError, match="issue_time later than forecast_init_time"):
+    with pytest.raises(ValueError, match="none are at or before"):
         load_future_weather_features("prepared_forecast_csv", "2024-01-01T00:00:00Z", 1, ["108"], path=path)
 
     pd.DataFrame(
@@ -78,8 +78,8 @@ def test_prepared_forecast_csv_adapter_enforces_v4_issue_and_horizon_alignment(t
                 "station_id": "108",
                 "forecast_init_time": "2024-01-01T00:00:00Z",
                 "issue_time": "2024-01-01T00:00:00Z",
-                "valid_time": "2024-01-01T02:00:00Z",
-                "horizon_step": 1,
+                "valid_time": "2024-01-01T01:00:00Z",
+                "horizon_step": 2,
                 "nwp_t2m": 281.15,
             }
         ]
