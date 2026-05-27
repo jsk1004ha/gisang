@@ -644,8 +644,6 @@ def test_v2_forecast_decoder_uses_future_known_covariates(synthetic_v2_project: 
     )
 
 
-
-
 def test_v2_operational_predict_requires_explicit_forecast_csv() -> None:
     class OperationalBundle:
         metadata = {
