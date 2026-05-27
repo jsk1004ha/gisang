@@ -1,0 +1,102 @@
+experiment:
+  name: v3_5_humidity_prepared_forecast_rh_residual_lgbm_72to24
+  version: v3.5
+  notes: >-
+    V3.5 honest humidity residual MOS over an issue-time-aligned prepared forecast CSV.
+    This is the operational counterpart to the ERA5-derived V3.5 RH diagnostic baseline.
+paths:
+  nwp_forecast_csv: data/raw/nwp/prepared_humidity_forecast_20241001_20250228.csv
+  base_training_config: configs/v3/experiments/v3_humidity_direct_lgbm_72to24.yaml
+  output_training_table: data/processed/v3_5_humidity_prepared_forecast_rh_residual_lgbm_72to24/training_table.csv
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+data:
+  target_name: humidity
+  base_training_config: configs/v3/experiments/v3_humidity_direct_lgbm_72to24.yaml
+  min_lead_hour: 1
+  window:
+    prediction_length: 24
+  features:
+    nwp_features:
+      - nwp_relative_humidity_2m
+      - nwp_temp_2m_c
+      - nwp_dew_point_2m_c
+      - nwp_dew_point_depression
+      - nwp_surface_pressure
+      - nwp_u10
+      - nwp_v10
+      - nwp_wind_speed
+      - nwp_total_precipitation
+    init_features:
+      - obs_temp
+      - obs_humidity
+      - obs_dew_point_c
+      - obs_dew_point_depression
+      - obs_pressure
+      - obs_wind_speed
+      - obs_precipitation
+      - obs_vapor_pressure_hpa
+      - obs_absolute_humidity_g_m3
+      - target_value
+      - target_value_lag_1
+      - target_value_lag_3
+      - target_value_lag_6
+      - target_value_lag_12
+      - target_value_lag_24
+      - target_value_lag_48
+      - target_value_lag_72
+      - target_value_lag_168
+      - target_value_roll_mean_3
+      - target_value_roll_mean_6
+      - target_value_roll_mean_12
+      - target_value_roll_mean_24
+      - target_value_delta_1
+      - target_value_delta_6
+      - target_value_delta_24
+      - obs_humidity_delta_1
+      - obs_humidity_delta_6
+      - obs_humidity_delta_24
+      - obs_temp_delta_1
+      - obs_temp_delta_6
+      - obs_temp_delta_24
+    static_features:
+      - lat
+      - lon
+      - elevation
+      - coastal_distance_km
+  postprocess:
+    clip_prediction: [0, 100]
+  future_features:
+    track: nwp_assisted_mos
+    source: prepared_forecast_csv
+    operational_valid: true
+    backtest_only: false
+    schema:
+      version: v4-prepared-forecast-v1
+      valid: null
+    weather_columns:
+      - nwp_relative_humidity_2m
+      - nwp_temp_2m_c
+      - nwp_dew_point_2m_c
+      - nwp_dew_point_depression
+      - nwp_surface_pressure
+      - nwp_u10
+      - nwp_v10
+      - nwp_wind_speed
+      - nwp_total_precipitation
+model:
+  name: v3_5_humidity_prepared_forecast_rh_residual_lgbm_72to24
+  type: nwp_mos_lightgbm
+  residual: true
+  baseline_column: nwp_relative_humidity_2m
+  params:
+    n_estimators: 1200
+    learning_rate: 0.025
+    num_leaves: 127
+    min_child_samples: 20
+    subsample: 0.9
+    colsample_bytree: 0.9
+    random_state: 20260527
+    n_jobs: 8
+artifacts:
+  root_dir: data/artifacts/v3_nwp_mos_experiments
+  profile: minimal

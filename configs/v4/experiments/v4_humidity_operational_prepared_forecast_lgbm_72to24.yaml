@@ -1,0 +1,52 @@
+experiment:
+  name: v4_humidity_operational_prepared_forecast_lgbm_72to24
+  version: v4
+  v4_stage: v4_operational_candidate
+  notes: >-
+    V4 humidity MOS candidate using prepared forecast RH/dew-point covariates.
+    Compare against the V3.5 humidity prepared forecast config before adding patch features.
+paths:
+  prepared_forecast_csv: data/raw/nwp/prepared_humidity_forecast_20241001_20250228.csv
+  base_training_config: configs/v3/experiments/v3_5_humidity_prepared_forecast_rh_residual_lgbm_72to24.yaml
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+data:
+  target_name: humidity
+  min_lead_hour: 1
+  window:
+    prediction_length: 24
+  future_features:
+    track: nwp_assisted_mos
+    source: prepared_forecast_csv
+    operational_valid: true
+    backtest_only: false
+    schema:
+      version: v4-prepared-forecast-v1
+      valid: null
+    weather_columns:
+      - nwp_relative_humidity_2m
+      - nwp_temp_2m_c
+      - nwp_dew_point_2m_c
+      - nwp_dew_point_depression
+      - nwp_surface_pressure
+      - nwp_wind_speed
+      - nwp_total_precipitation
+forecast_schema:
+  version: v4-prepared-forecast-v1
+  valid: null
+v4:
+  stage: v4_operational_candidate
+model:
+  name: v4_humidity_operational_prepared_forecast_lgbm_72to24
+  type: nwp_mos_lightgbm
+  residual: true
+  baseline_column: nwp_relative_humidity_2m
+  params:
+    n_estimators: 1200
+    learning_rate: 0.025
+    num_leaves: 127
+    min_child_samples: 20
+    random_state: 20260527
+    n_jobs: 8
+artifacts:
+  root_dir: data/artifacts/v4_experiments
+  profile: minimal

@@ -1,0 +1,45 @@
+experiment:
+  name: v4_temp_operational_prepared_forecast_ridge_72to24
+  version: v4
+  v4_stage: v4_operational_candidate
+  notes: >-
+    V4 station-level temperature MOS candidate using prepared forecast CSV input.
+    This config exists to keep V4 operational runs separate from V3 ERA5 backtests.
+paths:
+  prepared_forecast_csv: data/raw/nwp/prepared_temperature_forecast_20241001_20250228.csv
+  base_training_config: configs/v3/experiments/v3_temp_mos_residual_ridge_72to24.yaml
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+data:
+  target_name: temp
+  min_lead_hour: 1
+  window:
+    prediction_length: 24
+  future_features:
+    track: nwp_assisted_mos
+    source: prepared_forecast_csv
+    operational_valid: true
+    backtest_only: false
+    schema:
+      version: v4-prepared-forecast-v1
+      valid: null
+    weather_columns:
+      - nwp_temp_2m_c
+      - nwp_surface_pressure
+      - nwp_u10
+      - nwp_v10
+      - nwp_wind_speed
+      - nwp_total_precipitation
+forecast_schema:
+  version: v4-prepared-forecast-v1
+  valid: null
+v4:
+  stage: v4_operational_candidate
+model:
+  name: v4_temp_operational_prepared_forecast_ridge_72to24
+  type: ridge
+  residual: true
+  baseline_column: nwp_temp_2m_c
+  alpha_grid: [0.01, 0.1, 1.0, 10.0, 100.0]
+artifacts:
+  root_dir: data/artifacts/v4_experiments
+  profile: minimal
