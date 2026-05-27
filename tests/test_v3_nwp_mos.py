@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from weather_korea_forecast.utils.io import read_table
+from weather_korea_forecast.utils.config import load_yaml
 from weather_korea_forecast.v2.future_features import load_future_weather_archive, load_future_weather_features
 from weather_korea_forecast.v3 import nwp_mos
 
@@ -220,6 +221,45 @@ def test_nwp_mos_frame_joins_patch_features_and_supports_ridge(monkeypatch: pyte
     model_payload = pickle.loads((experiment_dir / "model.pkl").read_bytes())
     assert metadata["uses_patch_features"] is True
     assert model_payload["model_type"] == "ridge"
+
+
+def test_nwp_mos_frame_rejects_partial_patch_key_coverage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    observations = _synthetic_observation_frame()
+    forecast_path = _synthetic_nwp_archive(observations, tmp_path / "nwp.csv")
+    patch_path = _synthetic_patch_features(forecast_path, tmp_path / "patch.csv")
+    patch = pd.read_csv(patch_path).head(1)
+    patch.to_csv(patch_path, index=False)
+    monkeypatch.setattr(nwp_mos, "load_or_prepare_v2_training_table", lambda config: observations.copy())
+    config = {
+        "experiment": {"name": "synthetic_temp_patch_mos", "version": "v4"},
+        "paths": {"prepared_forecast_csv": str(forecast_path), "patch_feature_csv": str(patch_path)},
+        "data": {
+            "target_name": "humidity",
+            "window": {"prediction_length": 3},
+            "features": {"nwp_features": ["nwp_relative_humidity_2m"], "init_features": ["obs_humidity"]},
+            "future_features": {
+                "track": "nwp_assisted_mos",
+                "source": "prepared_forecast_csv",
+                "operational_valid": True,
+                "schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+                "weather_columns": ["nwp_relative_humidity_2m"],
+                "patch_features": {"enabled": True, "patch_size": 5, "feature_set": "summary_v1"},
+            },
+        },
+        "model": {"type": "ridge", "residual": True, "baseline_column": "nwp_relative_humidity_2m"},
+        "artifacts": {"root_dir": str(tmp_path / "artifacts")},
+    }
+
+    with pytest.raises(ValueError, match="missing expected NWP MOS frame keys"):
+        nwp_mos.build_nwp_mos_frame(config)
+
+
+def test_v4_horizonwise_prepared_nwp_config_selects_horizonwise_model() -> None:
+    config = load_yaml("configs/v4/experiments/v4_temp_mos_horizonwise_residual_ridge_prepared_nwp_72to24.yaml")
+
+    assert config["model"]["type"] == "horizon_wise_ridge"
+    model = nwp_mos._build_model(config["model"])
+    assert model.__class__.__name__ == "_HorizonWiseRegressor"
 
 
 def test_load_future_weather_features_adapter_returns_canonical_schema(tmp_path: Path) -> None:

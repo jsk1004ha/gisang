@@ -39,7 +39,7 @@ v4:
   stage: v4_operational_candidate
 model:
   name: v4_temp_mos_horizonwise_residual_ridge_prepared_nwp_72to24
-  type: ridge
+  type: horizon_wise_ridge
   residual: true
   residual_target:
     baseline: nwp_t2m

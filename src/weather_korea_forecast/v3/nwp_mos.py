@@ -303,13 +303,19 @@ def _load_patch_features(path: str | Path | None, frame: pd.DataFrame) -> pd.Dat
     if not candidate_columns:
         raise ValueError("Patch feature CSV has no patch summary columns.")
     patch = patch[key_columns + candidate_columns].copy()
-    # Keep only keys that can join to the NWP/observation frame so a stale patch
-    # artifact fails by producing zero usable feature rows in the audit/tests.
     frame_keys = frame[key_columns].drop_duplicates()
-    patch = patch.merge(frame_keys, on=key_columns, how="inner")
-    if patch.empty:
-        raise ValueError("Patch feature CSV has no rows matching the NWP MOS frame keys.")
-    return patch
+    patch_keys = patch[key_columns].drop_duplicates()
+    missing = frame_keys.merge(patch_keys, on=key_columns, how="left", indicator=True)
+    missing = missing.loc[missing["_merge"].eq("left_only"), key_columns]
+    if not missing.empty:
+        preview = missing.head(5).to_dict(orient="records")
+        raise ValueError(
+            "Patch feature CSV is missing expected NWP MOS frame keys: "
+            f"{len(missing)} missing rows; preview={preview}"
+        )
+    # Extra patch keys are tolerated because a precomputed patch archive may
+    # cover more stations/times than the current split/config.
+    return patch.merge(frame_keys, on=key_columns, how="inner")
 
 
 def _time_features_from_series(series: pd.Series, prefix: str) -> pd.DataFrame:
