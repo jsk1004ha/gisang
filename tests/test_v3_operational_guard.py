@@ -53,8 +53,6 @@ def test_prepared_forecast_csv_adapter_rejects_missing_horizon(tmp_path: Path) -
         load_future_weather_features("prepared_forecast_csv", "2024-01-01T00:00:00Z", 2, ["108"], path=path)
 
 
-
-
 def test_prepared_forecast_csv_adapter_enforces_v4_issue_and_horizon_alignment(tmp_path: Path) -> None:
     path = tmp_path / "forecast.csv"
     pd.DataFrame(

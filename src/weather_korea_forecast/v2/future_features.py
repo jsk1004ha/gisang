@@ -218,6 +218,13 @@ def load_future_weather_features(
     frames = []
     for station_id in stations:
         table = load_future_weather_table(path, cfg, str(station_id), start)
+        if "horizon_step" in table.columns:
+            expected_steps = ((table["datetime"] - start) / pd.Timedelta(hours=1)).astype(int)
+            configured_steps = table["horizon_step"].astype(int)
+            if not configured_steps.equals(expected_steps):
+                raise ValueError(
+                    "Prepared forecast CSV has valid_time rows that do not match forecast_init_time + horizon_step hours."
+                )
         valid_times = pd.date_range(start=start + pd.Timedelta(hours=1), periods=int(horizon), freq="1h", tz="UTC")
         table = table.loc[table["datetime"].isin(valid_times)].copy()
         table["horizon_step"] = ((table["datetime"] - start) / pd.Timedelta(hours=1)).astype(int)
