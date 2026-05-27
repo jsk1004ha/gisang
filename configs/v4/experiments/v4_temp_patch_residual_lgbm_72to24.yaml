@@ -1,0 +1,54 @@
+experiment:
+  name: v4_temp_patch_residual_lgbm_72to24
+  version: v4
+  v4_stage: v4_patch_feature_candidate
+  notes: >-
+    V4-B patch-summary residual MOS candidate. Uses prepared forecast CSV plus station-centered
+    NWP patch summary features so it can be compared with the scalar prepared-NWP MOS baseline.
+paths:
+  prepared_forecast_csv: data/raw/nwp/prepared_temperature_forecast_20241001_20250228.csv
+  future_weather_csv: data/raw/nwp/prepared_temperature_forecast_20241001_20250228.csv
+  patch_feature_csv: data/processed/v4/patch_features/temp_5x5_summary_v1.csv
+  base_training_config: configs/v4/experiments/v4_temp_mos_residual_ridge_prepared_nwp_72to24.yaml
+data:
+  target_name: temp
+  min_lead_hour: 1
+  window:
+    encoder_length: 72
+    prediction_length: 24
+  future_features:
+    track: nwp_assisted_mos
+    source: prepared_forecast_csv
+    operational_valid: true
+    backtest_only: false
+    schema:
+      version: v4-prepared-forecast-v1
+      valid: null
+    patch_features:
+      enabled: true
+      patch_size: 5
+      feature_set: summary_v1
+forecast_schema:
+  version: v4-prepared-forecast-v1
+  valid: null
+patch_features:
+  enabled: true
+  patch_size: 5
+  feature_set: summary_v1
+v4:
+  stage: v4_patch_feature_candidate
+model:
+  name: v4_temp_patch_residual_lgbm_72to24
+  type: lightgbm
+  residual: true
+  baseline_column: nwp_t2m
+  params:
+    n_estimators: 800
+    learning_rate: 0.03
+    num_leaves: 63
+    min_child_samples: 20
+    random_state: 20260527
+    n_jobs: 8
+artifacts:
+  root_dir: data/artifacts/v4_experiments
+  profile: minimal

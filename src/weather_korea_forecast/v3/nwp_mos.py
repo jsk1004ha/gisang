@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import pickle
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +11,7 @@ import pandas as pd
 
 from weather_korea_forecast.training.metrics import compute_prediction_metrics
 from weather_korea_forecast.utils.config import load_yaml
-from weather_korea_forecast.utils.io import read_table, write_json, write_table
+from weather_korea_forecast.utils.io import write_json, write_table
 from weather_korea_forecast.utils.paths import resolve_path
 from weather_korea_forecast.v2.data import load_or_prepare_v2_training_table
 from weather_korea_forecast.v2.future_features import build_future_feature_metadata, load_future_weather_archive
@@ -154,6 +153,15 @@ def run_nwp_mos_experiment(config: dict[str, Any]) -> Path:
         "experiment": config.get("experiment", {}),
         "metrics": metrics_by_split,
         "future_features": metadata,
+        "forecast_schema_version": metadata.get("forecast_schema_version"),
+        "forecast_schema_valid": metadata.get("forecast_schema_valid"),
+        "forecast_source_schema_valid": metadata.get("forecast_source_schema_valid"),
+        "forecast_source_path": metadata.get("forecast_source_path"),
+        "uses_patch_features": metadata.get("uses_patch_features"),
+        "patch_features_enabled": metadata.get("patch_features_enabled"),
+        "patch_size": metadata.get("patch_size"),
+        "patch_feature_set": metadata.get("patch_feature_set"),
+        "patch_feature_mode": metadata.get("patch_feature_mode"),
     }
     write_json(summary, experiment_dir / "experiment_summary.json")
     print(experiment_dir)

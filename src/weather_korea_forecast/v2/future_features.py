@@ -45,6 +45,7 @@ def build_future_feature_metadata(config: dict[str, Any]) -> dict[str, Any]:
 
     feature_config = config.get("data", {}).get("features", {})
     future_config = _future_feature_config(config)
+    paths_config = dict(config.get("paths") or {})
     decoder_columns = [str(column) for column in feature_config.get("decoder_known", [])]
     configured_weather_columns = [str(column) for column in future_config.get("weather_columns", [])]
     weather_columns = sorted(
@@ -115,6 +116,37 @@ def build_future_feature_metadata(config: dict[str, Any]) -> dict[str, Any]:
             else "",
         )
     )
+    forecast_schema = _merge_metadata_dicts(
+        future_config.get("schema"),
+        config.get("forecast_schema"),
+        config.get("v4", {}).get("forecast_schema") if isinstance(config.get("v4"), dict) else {},
+    )
+    forecast_schema_valid = _coerce_optional_bool(
+        future_config.get(
+            "forecast_source_schema_valid",
+            config.get("forecast_source_schema_valid", forecast_schema.get("valid", forecast_schema.get("schema_valid"))),
+        )
+    )
+    forecast_source_path = (
+        future_config.get("forecast_source_path")
+        or paths_config.get("prepared_forecast_csv")
+        or paths_config.get("future_weather_csv")
+        or paths_config.get("nwp_forecast_csv")
+    )
+    patch_features = _merge_metadata_dicts(
+        future_config.get("patch_features"),
+        config.get("patch_features"),
+        config.get("v4", {}).get("patch_features") if isinstance(config.get("v4"), dict) else {},
+    )
+    uses_patch_features = _coerce_optional_bool(
+        future_config.get("uses_patch_features", patch_features.get("enabled"))
+    )
+    patch_feature_mode = (
+        future_config.get("patch_feature_mode")
+        or patch_features.get("mode")
+        or patch_features.get("feature_set")
+        or patch_features.get("name")
+    )
     return {
         "uses_future_weather_features": uses_future_weather,
         "uses_future_nwp_features": uses_future_weather,
@@ -122,6 +154,16 @@ def build_future_feature_metadata(config: dict[str, Any]) -> dict[str, Any]:
         "future_feature_source": source,
         "operational_valid": operational_valid,
         "backtest_only": backtest_only,
+        "forecast_schema": forecast_schema,
+        "forecast_schema_version": forecast_schema.get("version") or forecast_schema.get("schema_version"),
+        "forecast_schema_valid": forecast_schema_valid,
+        "forecast_source_schema_valid": forecast_schema_valid,
+        "forecast_source_path": str(forecast_source_path) if forecast_source_path else None,
+        "uses_patch_features": uses_patch_features,
+        "patch_features_enabled": uses_patch_features,
+        "patch_size": _coerce_optional_int(patch_features.get("patch_size", patch_features.get("size"))),
+        "patch_feature_set": patch_features.get("feature_set") or patch_features.get("name"),
+        "patch_feature_mode": str(patch_feature_mode) if patch_feature_mode is not None else None,
         "forecast_track": forecast_track,
         "track": forecast_track,
         "leakage_risk_note": leakage_risk_note,
@@ -245,9 +287,9 @@ def _validate_prepared_forecast_features(
     invalid_valid_times = normalized["valid_time"] != expected_valid_times
     if invalid_valid_times.any():
         raise ValueError("Prepared forecast CSV has valid_time rows that do not match forecast_init_time + horizon_step hours.")
-    duplicate_count = int(normalized.duplicated(["station_id", "valid_time", "horizon_step"]).sum())
+    duplicate_count = int(normalized.duplicated(["station_id", "forecast_init_time", "horizon_step"]).sum())
     if duplicate_count:
-        raise ValueError(f"Prepared forecast CSV contains {duplicate_count} duplicate station/valid_time/horizon rows.")
+        raise ValueError(f"Prepared forecast CSV contains {duplicate_count} duplicate station/forecast_init_time/horizon rows.")
     expected = {(station, step) for station in stations for step in range(1, horizon + 1)}
     observed = set(zip(normalized["station_id"], normalized["horizon_step"]))
     missing_horizons = sorted(expected - observed)
@@ -307,6 +349,12 @@ def load_future_weather_table(
             )
         selected_issue_time = eligible[issue_time_column].max()
         frame = eligible.loc[eligible[issue_time_column] == selected_issue_time].copy()
+    if "forecast_init_time" in frame.columns and "horizon_step" in frame.columns:
+        parsed_init = pd.to_datetime(frame["forecast_init_time"], utc=True)
+        parsed_horizon = frame["horizon_step"].astype(int)
+        expected_valid_time = parsed_init + pd.to_timedelta(parsed_horizon, unit="h")
+        if (frame["datetime"] != expected_valid_time).any():
+            raise ValueError("Prepared forecast CSV has valid_time rows that do not match forecast_init_time + horizon_step hours.")
 
     frame = _add_future_weather_derived_columns(frame)
     return frame.drop_duplicates(["station_id", "datetime"]).sort_values(["station_id", "datetime"]).reset_index(drop=True)
@@ -363,6 +411,44 @@ def _future_feature_config(config: dict[str, Any]) -> dict[str, Any]:
     data_config = config.get("data", {})
     raw = data_config.get("future_features", data_config.get("future_weather_features", {}))
     return dict(raw or {})
+
+
+def _merge_metadata_dicts(*values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for value in values:
+        if isinstance(value, dict):
+            merged.update(value)
+    return merged
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+        if lowered in {"", "none", "null"}:
+            return None
+    return bool(value)
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_source(value: Any) -> str:
@@ -445,9 +531,7 @@ def _apply_future_weather_column_mapping(frame: pd.DataFrame, config: dict[str, 
         "nwp_tcc": "nwp_cloud_cover",
         "gfs_tcc": "nwp_cloud_cover",
         "gfs_cloud_cover": "nwp_cloud_cover",
-        "nwp_u10": "nwp_u10",
         "gfs_u10": "nwp_u10",
-        "nwp_v10": "nwp_v10",
         "gfs_v10": "nwp_v10",
         "nwp_total_precipitation": "nwp_total_precipitation",
         "gfs_total_precipitation": "nwp_total_precipitation",

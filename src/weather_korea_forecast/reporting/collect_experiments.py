@@ -93,7 +93,10 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
     if summary.get("operational_valid") is False or future.get("operational_valid") is False:
         warnings.append("operational_valid=false")
     forecast_schema_valid = _bool(
-        summary.get("forecast_schema_valid", forecast_schema.get("valid", forecast_schema.get("schema_valid")))
+        summary.get(
+            "forecast_source_schema_valid",
+            summary.get("forecast_schema_valid", forecast_schema.get("valid", forecast_schema.get("schema_valid"))),
+        )
     )
     if forecast_schema_valid is False:
         warnings.append("forecast_schema_valid=false")
@@ -169,11 +172,29 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
             or forecast_schema.get("schema_version")
         ),
         forecast_schema_valid=forecast_schema_valid,
+        forecast_source_schema_valid=forecast_schema_valid,
+        forecast_source_path=_str(
+            summary.get("forecast_source_path")
+            or future.get("forecast_source_path")
+            or config.get("paths", {}).get("prepared_forecast_csv")
+            or config.get("paths", {}).get("future_weather_csv")
+            or config.get("paths", {}).get("nwp_forecast_csv")
+        ),
         patch_features_enabled=_bool(
-            summary.get("patch_features_enabled", patch_features.get("enabled"))
+            summary.get("uses_patch_features", summary.get("patch_features_enabled", patch_features.get("enabled")))
+        ),
+        uses_patch_features=_bool(
+            summary.get("uses_patch_features", summary.get("patch_features_enabled", patch_features.get("enabled")))
         ),
         patch_size=_int(summary.get("patch_size") or patch_features.get("patch_size") or patch_features.get("size")),
         patch_feature_set=_str(summary.get("patch_feature_set") or patch_features.get("feature_set") or patch_features.get("name")),
+        patch_feature_mode=_str(
+            summary.get("patch_feature_mode")
+            or summary.get("patch_feature_set")
+            or patch_features.get("mode")
+            or patch_features.get("feature_set")
+            or patch_features.get("name")
+        ),
         bias_correction_enabled=_bool(bias.get("enabled")) if bias else None,
         bias_correction_mode=_str(bias.get("mode")) if bias else None,
         bias_correction_method=_str(bias.get("method")) if bias else None,

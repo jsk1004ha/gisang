@@ -1,0 +1,51 @@
+experiment:
+  name: v4_temp_mos_horizonwise_residual_ridge_prepared_nwp_72to24
+  version: v4
+  v4_stage: v4_operational_candidate
+  notes: >-
+    V4-A operational temperature MOS candidate using prepared forecast CSV input.
+    This config keeps real forecast-NWP experiments separate from ERA5 reanalysis backtests.
+paths:
+  prepared_forecast_csv: data/raw/nwp/prepared_temperature_forecast_20241001_20250228.csv
+  future_weather_csv: data/raw/nwp/prepared_temperature_forecast_20241001_20250228.csv
+  base_training_config: configs/v3/experiments/v3_temp_mos_horizonwise_residual_ridge_72to24.yaml
+  station_metadata_csv: data/raw/metadata/stations_v2.csv
+data:
+  target_name: temp
+  min_lead_hour: 1
+  window:
+    encoder_length: 72
+    prediction_length: 24
+  future_features:
+    track: nwp_assisted_mos
+    source: prepared_forecast_csv
+    operational_valid: true
+    backtest_only: false
+    schema:
+      version: v4-prepared-forecast-v1
+      valid: null
+    weather_columns:
+      - nwp_t2m
+      - nwp_sp
+      - nwp_u10
+      - nwp_v10
+      - nwp_tp
+      - nwp_dew_point
+forecast_schema:
+  version: v4-prepared-forecast-v1
+  valid: null
+v4:
+  stage: v4_operational_candidate
+model:
+  name: v4_temp_mos_horizonwise_residual_ridge_prepared_nwp_72to24
+  type: ridge
+  residual: true
+  residual_target:
+    baseline: nwp_t2m
+    target: observed_temp_minus_nwp_t2m
+    final: nwp_t2m_plus_predicted_residual
+  baseline_column: nwp_t2m
+  alpha_grid: [0.01, 0.1, 1.0, 10.0, 100.0]
+artifacts:
+  root_dir: data/artifacts/v4_experiments
+  profile: minimal

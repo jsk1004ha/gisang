@@ -62,9 +62,13 @@ class ExperimentRecord:
     v4_stage: str = "pre_v4"
     forecast_schema_version: str | None = None
     forecast_schema_valid: bool | None = None
+    forecast_source_schema_valid: bool | None = None
+    forecast_source_path: str | None = None
     patch_features_enabled: bool | None = None
+    uses_patch_features: bool | None = None
     patch_size: int | None = None
     patch_feature_set: str | None = None
+    patch_feature_mode: str | None = None
     bias_correction_enabled: bool | None = None
     bias_correction_mode: str | None = None
     bias_correction_method: str | None = None
