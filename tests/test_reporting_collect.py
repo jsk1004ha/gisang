@@ -153,3 +153,57 @@ def test_minimal_artifact_profile_does_not_warn_for_missing_plots(tmp_path: Path
 
     assert record.artifact_profile == "minimal"
     assert not any("png missing" in warning for warning in record.warnings)
+
+
+def test_collect_experiment_preserves_v4_schema_and_patch_fields(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts" / "v4_experiments"
+    _write_experiment_with_summary(
+        root,
+        "v4_temp_patch_lgbm_20260527T000000Z",
+        {
+            "version": "v4",
+            "target_name": "temp",
+            "track": "nwp_assisted_mos",
+            "metrics": {"rmse": 0.9, "mae": 0.7, "bias": 0.0},
+            "future_feature_source": "prepared_forecast_csv",
+            "operational_valid": True,
+            "backtest_only": False,
+            "forecast_schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+            "patch_features": {"enabled": True, "patch_size": 5, "feature_set": "summary_v1"},
+        },
+    )
+
+    record = collect_all(root.parent)[0]
+
+    assert record.v4_stage == "v4_operational_candidate"
+    assert record.forecast_schema_version == "v4-prepared-forecast-v1"
+    assert record.forecast_schema_valid is True
+    assert record.patch_features_enabled is True
+    assert record.patch_size == 5
+    assert record.patch_feature_set == "summary_v1"
+
+    summary_path = write_summary_csv([record], tmp_path / "reports" / "experiment_summary.csv")
+    summary = pd.read_csv(summary_path)
+    assert summary.loc[0, "v4_stage"] == "v4_operational_candidate"
+    assert bool(summary.loc[0, "forecast_schema_valid"]) is True
+
+
+def test_collect_experiment_warns_when_v4_schema_invalid(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts" / "v4_experiments"
+    _write_experiment_with_summary(
+        root,
+        "v4_temp_invalid_schema",
+        {
+            "version": "v4",
+            "future_feature_source": "prepared_forecast_csv",
+            "operational_valid": False,
+            "forecast_schema_valid": False,
+            "patch_features_enabled": False,
+        },
+    )
+
+    record = collect_all(root.parent)[0]
+
+    assert record.forecast_schema_valid is False
+    assert record.patch_features_enabled is False
+    assert "forecast_schema_valid=false" in record.warnings

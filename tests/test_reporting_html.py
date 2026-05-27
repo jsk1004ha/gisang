@@ -152,3 +152,41 @@ def test_render_report_charts_use_main_records_only(tmp_path: Path) -> None:
     assert "real_model" in charts
     assert "oracle_model" not in charts
     assert "decoder_feature_baseline" not in charts
+
+
+def test_render_report_contains_v4_schema_and_patch_badges(tmp_path: Path) -> None:
+    exp = tmp_path / "v4"
+    exp.mkdir()
+    record = ExperimentRecord(
+        experiment_name="v4_temp_patch_lgbm_72to24",
+        version="v4",
+        target_name="temp",
+        track="nwp_assisted_mos",
+        model_type="lightgbm",
+        rmse=0.95,
+        mae=0.7,
+        bias=0.0,
+        rmse_goal=1.0,
+        rmse_goal_met=True,
+        future_feature_source="prepared_forecast_csv",
+        operational_valid=True,
+        backtest_only=False,
+        v4_stage="v4_operational_candidate",
+        forecast_schema_version="v4-prepared-forecast-v1",
+        forecast_schema_valid=True,
+        patch_features_enabled=True,
+        patch_size=5,
+        patch_feature_set="summary_v1",
+        included_in_main_leaderboard=True,
+        artifact_dir=str(exp),
+    )
+
+    html = render_report([record], title="Report", experiments_root=tmp_path, include_images=False)
+
+    assert "V4 forecast schema validation" in html
+    assert "V4 patch feature readiness" in html
+    assert "schema v4-prepared-forecast-v1" in html
+    assert "patch 5x5 summary_v1" in html
+    assert "stageFilter" in html
+    assert "schemaFilter" in html
+    assert "patchFilter" in html

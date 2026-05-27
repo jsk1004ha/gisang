@@ -74,12 +74,15 @@ def render_report(
       {_select('modelFilter', '모델 유형')}
       {_select('sourceFilter', '미래 feature 소스')}
       {_select('opFilter', '운영 가능')}
+      {_select('stageFilter', 'V4 단계')}
+      {_select('schemaFilter', 'Schema 검증')}
+      {_select('patchFilter', 'Patch feature')}
       {_select('goalFilter', '목표 달성')}
     </div>
     <div class=\"table-wrap\">
       <table id=\"leaderboard\">
         <thead><tr>
-          <th onclick=\"sortTable(0)\">실험</th><th onclick=\"sortTable(1)\">버전</th><th onclick=\"sortTable(2)\">타깃</th><th onclick=\"sortTable(3)\">트랙</th><th onclick=\"sortTable(4)\">모델</th><th onclick=\"sortTable(5)\">RMSE</th><th onclick=\"sortTable(6)\">MAE</th><th onclick=\"sortTable(7)\">Bias</th><th onclick=\"sortTable(8)\">최악 Horizon RMSE</th><th onclick=\"sortTable(9)\">최악 관측소 RMSE</th><th onclick=\"sortTable(10)\">목표</th><th>상태</th><th>Artifact 경로</th>
+          <th onclick=\"sortTable(0)\">실험</th><th onclick=\"sortTable(1)\">버전</th><th onclick=\"sortTable(2)\">타깃</th><th onclick=\"sortTable(3)\">트랙</th><th onclick=\"sortTable(4)\">모델</th><th onclick=\"sortTable(5)\">RMSE</th><th onclick=\"sortTable(6)\">MAE</th><th onclick=\"sortTable(7)\">Bias</th><th onclick=\"sortTable(8)\">최악 Horizon RMSE</th><th onclick=\"sortTable(9)\">최악 관측소 RMSE</th><th onclick=\"sortTable(10)\">목표</th><th>V4</th><th>상태</th><th>Artifact 경로</th>
         </tr></thead>
         <tbody>{table_rows}</tbody>
       </table>
@@ -174,11 +177,31 @@ def _leaderboard_row(record: ExperimentRecord) -> str:
         status.append('<span class="badge badge-ok">운영 가능</span>')
     elif record.operational_valid is False:
         status.append('<span class="badge badge-muted">운영 불가</span>')
-    return f"""<tr data-version=\"{_attr(record.version)}\" data-target=\"{_attr(record.target_name)}\" data-track=\"{_attr(record.track)}\" data-model=\"{_attr(record.model_type)}\" data-source=\"{_attr(record.future_feature_source)}\" data-op=\"{_attr(str(record.operational_valid))}\" data-goal=\"{_attr(str(record.rmse_goal_met))}\" data-name=\"{_attr(record.experiment_name.lower())}\">
+    v4_badges = _v4_badges(record)
+    return f"""<tr data-version=\"{_attr(record.version)}\" data-target=\"{_attr(record.target_name)}\" data-track=\"{_attr(record.track)}\" data-model=\"{_attr(record.model_type)}\" data-source=\"{_attr(record.future_feature_source)}\" data-op=\"{_attr(str(record.operational_valid))}\" data-stage=\"{_attr(record.v4_stage)}\" data-schema=\"{_attr(str(record.forecast_schema_valid))}\" data-patch=\"{_attr(str(record.patch_features_enabled))}\" data-goal=\"{_attr(str(record.rmse_goal_met))}\" data-name=\"{_attr(record.experiment_name.lower())}\">
       <td class=\"mono\">{html.escape(record.experiment_name)}</td><td>{html.escape(record.version)}</td><td>{html.escape(record.target_name)}</td><td>{html.escape(record.track)}</td><td>{html.escape(record.model_type)}</td>
       <td class=\"num {goal_class}\">{_fmt(record.rmse)}</td><td class=\"num\">{_fmt(record.mae)}</td><td class=\"num\">{_fmt(record.bias)}</td><td class=\"num\">{_fmt(record.worst_horizon_rmse)}</td><td class=\"num\">{_fmt(record.worst_station_rmse)}</td><td class=\"num\">{_fmt(record.rmse_goal)}</td>
-      <td>{''.join(status) or '<span class="badge badge-muted">n/a</span>'}</td><td class=\"mono small\">{html.escape(record.artifact_dir)}</td>
+      <td>{v4_badges}</td><td>{''.join(status) or '<span class="badge badge-muted">n/a</span>'}</td><td class=\"mono small\">{html.escape(record.artifact_dir)}</td>
     </tr>"""
+
+
+def _v4_badges(record: ExperimentRecord) -> str:
+    badges = [f'<span class="badge badge-blue">{html.escape(record.v4_stage)}</span>']
+    if record.forecast_schema_valid is True:
+        label = "schema ok" if not record.forecast_schema_version else f"schema {record.forecast_schema_version}"
+        badges.append(f'<span class="badge badge-ok">{html.escape(label)}</span>')
+    elif record.forecast_schema_valid is False:
+        badges.append('<span class="badge badge-bad">schema invalid</span>')
+    if record.patch_features_enabled is True:
+        patch_label = "patch"
+        if record.patch_size:
+            patch_label += f" {record.patch_size}x{record.patch_size}"
+        if record.patch_feature_set:
+            patch_label += f" {record.patch_feature_set}"
+        badges.append(f'<span class="badge badge-purple">{html.escape(patch_label)}</span>')
+    elif record.patch_features_enabled is False:
+        badges.append('<span class="badge badge-muted">no patch</span>')
+    return ''.join(badges)
 
 
 def _detail_section(record: ExperimentRecord, *, image_mode: str = "full") -> str:
@@ -201,7 +224,7 @@ def _detail_section(record: ExperimentRecord, *, image_mode: str = "full") -> st
       <div class=\"detail-body\">
         <div class=\"grid two\">
           <div><h3>성능 지표</h3><dl>{_dl({'타깃': record.target_name, '트랙': record.track, '모델': record.model_type, 'Encoder 길이': record.encoder_length, '예측 길이': record.prediction_length, 'RMSE': record.rmse, 'MAE': record.mae, 'Bias': record.bias, 'MAPE': record.mape, 'Raw RMSE': record.raw_rmse, 'Raw MAE': record.raw_mae, 'Raw Bias': record.raw_bias, 'Val RMSE': record.val_rmse, 'RMSE 목표': record.rmse_goal, '목표 상태': goal, '최악 horizon': record.worst_horizon_step, '최악 horizon RMSE': record.worst_horizon_rmse, '최악 horizon MAE': record.worst_horizon_mae, '최악 horizon Bias': record.worst_horizon_bias, '최악 관측소': record.worst_station_id, '최악 관측소 RMSE': record.worst_station_rmse})}</dl></div>
-          <div><h3>운영/대표 run 상태</h3><dl>{_dl({'미래 feature 소스': record.future_feature_source, '미래 기상 feature 사용': record.uses_future_weather_features, '운영 가능': record.operational_valid, '백테스트 전용': record.backtest_only, '진단/oracle': record.is_diagnostic, 'artifact profile': record.artifact_profile, 'alias artifact': record.is_alias_artifact, '대표 run': record.is_representative_run, 'canonical id': record.canonical_experiment_id, 'run timestamp': record.run_timestamp, '누수 위험 메모': record.leakage_risk_note, 'Artifact 경로': record.artifact_dir})}</dl></div>
+          <div><h3>운영/대표 run 상태</h3><dl>{_dl({'미래 feature 소스': record.future_feature_source, '미래 기상 feature 사용': record.uses_future_weather_features, '운영 가능': record.operational_valid, '백테스트 전용': record.backtest_only, '진단/oracle': record.is_diagnostic, 'artifact profile': record.artifact_profile, 'alias artifact': record.is_alias_artifact, '대표 run': record.is_representative_run, 'canonical id': record.canonical_experiment_id, 'run timestamp': record.run_timestamp, '누수 위험 메모': record.leakage_risk_note, 'V4 단계': record.v4_stage, 'forecast schema version': record.forecast_schema_version, 'forecast schema valid': record.forecast_schema_valid, 'patch features': record.patch_features_enabled, 'patch size': record.patch_size, 'patch feature set': record.patch_feature_set, 'Artifact 경로': record.artifact_dir})}</dl></div>
         </div>
         <h3>경고 / 메모</h3>{warnings_block}
         {images}
@@ -260,6 +283,16 @@ def _readiness_section(all_records: list[ExperimentRecord], main_records: list[E
             "Humidity ≤ 10%p",
             "pass" if (_best_rmse(main_records, target="humidity") or float("inf")) <= 10.0 else "warn",
             f"현재 {_fmt(_best_rmse(main_records, target='humidity'))}; dew point/depression 및 predicted temp 연결이 필요합니다.",
+        ),
+        (
+            "V4 forecast schema validation",
+            "pass" if any(r.forecast_schema_valid is True for r in main_records) else "warn",
+            "prepared forecast CSV schema가 검증된 대표 run이 있어야 operational_valid=true를 신뢰할 수 있습니다.",
+        ),
+        (
+            "V4 patch feature readiness",
+            "pass" if any(r.patch_features_enabled is True for r in main_records) else "warn",
+            "3x3/5x5 NWP grid patch summary feature run이 main report에 들어와야 spatial V4 비교가 가능합니다.",
         ),
         (
             "Observation-only temp ≤ 2.0°C",
@@ -359,7 +392,7 @@ def _diagnostic_section(records: list[ExperimentRecord], *, image_mode: str = "f
     return f"""<section class="card diagnostic">
       <h2>Diagnostic / Oracle Checks</h2>
       <p class="warning-text">이 섹션의 실험은 pipeline sanity check, oracle decoder feature 검증, 누수 진단 목적입니다. 실제 예측 모델 성능이나 best RMSE로 해석하지 마십시오.</p>
-      <div class="table-wrap compact"><table><thead><tr><th>실험</th><th>버전</th><th>타깃</th><th>트랙</th><th>모델</th><th>RMSE</th><th>MAE</th><th>Bias</th><th>최악 Horizon RMSE</th><th>최악 관측소 RMSE</th><th>목표</th><th>상태</th><th>Artifact 경로</th></tr></thead><tbody>{rows}</tbody></table></div>
+      <div class="table-wrap compact"><table><thead><tr><th>실험</th><th>버전</th><th>타깃</th><th>트랙</th><th>모델</th><th>RMSE</th><th>MAE</th><th>Bias</th><th>최악 Horizon RMSE</th><th>최악 관측소 RMSE</th><th>목표</th><th>V4</th><th>상태</th><th>Artifact 경로</th></tr></thead><tbody>{rows}</tbody></table></div>
       <h3>Diagnostic 상세</h3>
       {details}
     </section>"""
@@ -372,7 +405,7 @@ def _alias_section(records: list[ExperimentRecord]) -> str:
     return f"""<section class="card alias">
       <h2>Alias Artifacts</h2>
       <p class="muted"><code>best</code>, <code>latest</code> alias artifact는 상세 확인용으로만 표시하며 main leaderboard, KPI, best model 산정에서는 제외됩니다.</p>
-      <div class="table-wrap compact"><table><thead><tr><th>실험</th><th>버전</th><th>타깃</th><th>트랙</th><th>모델</th><th>RMSE</th><th>MAE</th><th>Bias</th><th>최악 Horizon RMSE</th><th>최악 관측소 RMSE</th><th>목표</th><th>상태</th><th>Artifact 경로</th></tr></thead><tbody>{rows}</tbody></table></div>
+      <div class="table-wrap compact"><table><thead><tr><th>실험</th><th>버전</th><th>타깃</th><th>트랙</th><th>모델</th><th>RMSE</th><th>MAE</th><th>Bias</th><th>최악 Horizon RMSE</th><th>최악 관측소 RMSE</th><th>목표</th><th>V4</th><th>상태</th><th>Artifact 경로</th></tr></thead><tbody>{rows}</tbody></table></div>
     </section>"""
 
 
@@ -493,6 +526,9 @@ def _filter_options(records: list[ExperimentRecord]) -> dict[str, list[str]]:
         "modelFilter": values("model_type"),
         "sourceFilter": values("future_feature_source"),
         "opFilter": sorted({str(r.operational_valid) for r in records}),
+        "stageFilter": values("v4_stage"),
+        "schemaFilter": sorted({str(r.forecast_schema_valid) for r in records}),
+        "patchFilter": sorted({str(r.patch_features_enabled) for r in records}),
         "goalFilter": sorted({str(r.rmse_goal_met) for r in records}),
     }
 
@@ -571,7 +607,7 @@ svg { width:100%; height:auto; } .bar { fill:#6096f2; } .svg-label { font-size:1
 def _js() -> str:
     return """
 function initFilters(){ for (const [id, values] of Object.entries(FILTER_OPTIONS)){ const el=document.getElementById(id); if(!el) continue; for(const value of values){ const opt=document.createElement('option'); opt.value=value; opt.textContent=value; el.appendChild(opt);} } }
-function filterTable(){ const search=(document.getElementById('searchBox').value||'').toLowerCase(); const filters=[['versionFilter','version'],['targetFilter','target'],['trackFilter','track'],['modelFilter','model'],['sourceFilter','source'],['opFilter','op'],['goalFilter','goal']]; for(const row of document.querySelectorAll('#leaderboard tbody tr')){ let show=(row.dataset.name||'').includes(search); for(const [id,key] of filters){ const val=document.getElementById(id).value; if(val && row.dataset[key]!==val) show=false; } row.style.display=show?'':'none'; } }
+function filterTable(){ const search=(document.getElementById('searchBox').value||'').toLowerCase(); const filters=[['versionFilter','version'],['targetFilter','target'],['trackFilter','track'],['modelFilter','model'],['sourceFilter','source'],['opFilter','op'],['stageFilter','stage'],['schemaFilter','schema'],['patchFilter','patch'],['goalFilter','goal']]; for(const row of document.querySelectorAll('#leaderboard tbody tr')){ let show=(row.dataset.name||'').includes(search); for(const [id,key] of filters){ const val=document.getElementById(id).value; if(val && row.dataset[key]!==val) show=false; } row.style.display=show?'':'none'; } }
 let SORT_STATE={index:null,asc:true};
 function sortTable(index){ const tbody=document.querySelector('#leaderboard tbody'); const rows=Array.from(tbody.querySelectorAll('tr')); const asc=SORT_STATE.index===index ? !SORT_STATE.asc : true; SORT_STATE={index,asc}; rows.sort((a,b)=>{ const av=a.children[index].innerText.trim(); const bv=b.children[index].innerText.trim(); const an=parseFloat(av); const bn=parseFloat(bv); let cmp; if(!Number.isNaN(an) && !Number.isNaN(bn)){ cmp=an-bn; } else { cmp=av.localeCompare(bv); } return asc?cmp:-cmp; }); for(const row of rows){ tbody.appendChild(row); } filterTable(); }
 initFilters();
