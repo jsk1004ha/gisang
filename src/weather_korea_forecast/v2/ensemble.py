@@ -137,7 +137,6 @@ def _learn_ensemble_weights(
     key_columns: list[str],
     test_component_table: pd.DataFrame,
 ):
-    prediction_columns = [column for column in test_component_table.columns if column.startswith("prediction_component_")]
     if method in {"mean", "median"}:
         return fallback_weights
     val_frames = []

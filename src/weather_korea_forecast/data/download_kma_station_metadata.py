@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import os
 from io import StringIO
-from pathlib import Path
 from typing import Any
 
 import pandas as pd

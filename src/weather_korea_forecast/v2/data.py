@@ -184,7 +184,6 @@ def summarize_humidity_feature_sanity(frame: pd.DataFrame, config: dict) -> dict
 
 
 def _load_observations_from_config(config: dict) -> pd.DataFrame:
-    paths = config["paths"]
     data_config = config["data"]
     default_source_tz = data_config.get("timezone", {}).get("source", "Asia/Seoul")
     observations_config = data_config.get("observations", {})

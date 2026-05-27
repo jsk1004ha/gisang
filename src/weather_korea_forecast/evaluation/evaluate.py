@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import pandas as pd
 
 from weather_korea_forecast.evaluation.plots import plot_forecast_vs_actual
 from weather_korea_forecast.evaluation.regional_report import build_breakdown_reports

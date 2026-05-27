@@ -11,7 +11,6 @@ import requests
 
 from weather_korea_forecast.data.station_metadata import load_station_metadata
 from weather_korea_forecast.utils.io import write_table
-from weather_korea_forecast.utils.paths import resolve_path
 
 OPEN_METEO_SINGLE_RUNS_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
 DEFAULT_HOURLY_VARIABLES = [

@@ -3,10 +3,8 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import timedelta
 from typing import Any
-from urllib.parse import urlencode
 
 import pandas as pd
 import requests
@@ -15,7 +13,6 @@ from weather_korea_forecast.utils.config import load_yaml
 from weather_korea_forecast.utils.env import load_dotenv
 from weather_korea_forecast.utils.io import write_table
 from weather_korea_forecast.utils.logger import get_logger
-from weather_korea_forecast.utils.paths import resolve_path
 
 LOGGER = get_logger(__name__)
 
