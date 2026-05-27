@@ -47,6 +47,19 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
     bias = load_json_if_exists(exp_dir / "bias_correction.json")
     worst = load_json_if_exists(exp_dir / "worst_case_summary.json")
     future = dict(summary.get("future_features") or config.get("data", {}).get("future_features") or config.get("future_features") or {})
+    v4_meta = _merge_dicts(config.get("v4"), summary.get("v4"))
+    forecast_schema = _merge_dicts(
+        future.get("schema"),
+        config.get("forecast_schema"),
+        v4_meta.get("forecast_schema"),
+        summary.get("forecast_schema"),
+    )
+    patch_features = _merge_dicts(
+        future.get("patch_features"),
+        config.get("patch_features"),
+        v4_meta.get("patch_features"),
+        summary.get("patch_features"),
+    )
     future_source_hint = str(summary.get("future_feature_source") or future.get("future_feature_source") or future.get("source") or "none")
     target_name = _target_name(summary, config)
     track = _normalize_track(
@@ -79,6 +92,11 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
         warnings.append("ERA5 reanalysis future features are backtest-only")
     if summary.get("operational_valid") is False or future.get("operational_valid") is False:
         warnings.append("operational_valid=false")
+    forecast_schema_valid = _bool(
+        summary.get("forecast_schema_valid", forecast_schema.get("valid", forecast_schema.get("schema_valid")))
+    )
+    if forecast_schema_valid is False:
+        warnings.append("forecast_schema_valid=false")
     if _unknown_region(exp_dir):
         warnings.append("region_class contains unknown")
     if bias and not bool(bias.get("enabled", False)) and bias.get("disabled_reason"):
@@ -144,6 +162,18 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
         operational_valid=operational_valid,
         backtest_only=backtest_only,
         leakage_risk_note=_str(summary.get("leakage_risk_note") or future.get("leakage_risk_note")),
+        v4_stage=_v4_stage(exp_dir, summary, config, future, v4_meta),
+        forecast_schema_version=_str(
+            summary.get("forecast_schema_version")
+            or forecast_schema.get("version")
+            or forecast_schema.get("schema_version")
+        ),
+        forecast_schema_valid=forecast_schema_valid,
+        patch_features_enabled=_bool(
+            summary.get("patch_features_enabled", patch_features.get("enabled"))
+        ),
+        patch_size=_int(summary.get("patch_size") or patch_features.get("patch_size") or patch_features.get("size")),
+        patch_feature_set=_str(summary.get("patch_feature_set") or patch_features.get("feature_set") or patch_features.get("name")),
         bias_correction_enabled=_bool(bias.get("enabled")) if bias else None,
         bias_correction_mode=_str(bias.get("mode")) if bias else None,
         bias_correction_method=_str(bias.get("method")) if bias else None,
@@ -173,6 +203,30 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
 def collect_all(root: Path) -> list[ExperimentRecord]:
     return _mark_main_leaderboard_flags(_mark_representative_runs([collect_experiment(path) for path in find_experiment_dirs(root)]))
 
+
+
+def _merge_dicts(*values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for value in values:
+        if isinstance(value, dict):
+            merged.update(value)
+    return merged
+
+
+def _v4_stage(exp_dir: Path, summary: dict[str, Any], config: dict[str, Any], future: dict[str, Any], v4_meta: dict[str, Any]) -> str:
+    explicit = summary.get("v4_stage") or v4_meta.get("stage") or config.get("experiment", {}).get("v4_stage")
+    if explicit:
+        return str(explicit)
+    version = str(summary.get("version") or config.get("experiment", {}).get("version") or "").lower()
+    parts = {part.lower() for part in exp_dir.parts}
+    name = exp_dir.name.lower()
+    if version.startswith("v4") or "v4_experiments" in parts or name.startswith("v4_"):
+        if _bool(summary.get("operational_valid", future.get("operational_valid"))) is True:
+            return "v4_operational_candidate"
+        return "v4_candidate"
+    if version.startswith("v3.5") or name.startswith("v3_5"):
+        return "v3_5_baseline"
+    return "pre_v4"
 
 def _load_experiment_config(exp_dir: Path) -> dict[str, Any]:
     """Load V2/V3 unified config, or merge V1 snapshot configs into one view."""
