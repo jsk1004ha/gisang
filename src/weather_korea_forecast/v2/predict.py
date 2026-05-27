@@ -61,6 +61,7 @@ def generate_v2_forecast(
     )
     future_weather_frame = None
     configured_future_weather_csv = future_weather_csv or config.get("paths", {}).get("future_weather_csv")
+    _require_operational_forecast_csv(bundle, operational_mode, configured_future_weather_csv)
     if configured_future_weather_csv:
         future_weather_frame = load_future_weather_table(
             configured_future_weather_csv,
@@ -68,6 +69,8 @@ def generate_v2_forecast(
             station_id=normalized_station_id,
             forecast_init_time=init_time,
         )
+    if operational_mode:
+        _validate_operational_future_weather_frame(future_weather_frame, future_timestamps, bundle)
     decoder_frame = _build_forecast_decoder_frame(
         station_frame=station_frame,
         future_timestamps=future_timestamps,
@@ -419,6 +422,59 @@ def _validate_future_feature_inference_mode(bundle: V2DatasetBundle, operational
         if operational_mode:
             raise ValueError(message + " Provide GFS/ECMWF/KMA forecast features or disable operational mode.")
         warnings.warn(message, RuntimeWarning, stacklevel=2)
+
+
+def _require_operational_forecast_csv(
+    bundle: V2DatasetBundle,
+    operational_mode: bool,
+    future_weather_csv: str | Path | None,
+) -> None:
+    if not operational_mode:
+        return
+    future_features = dict(bundle.metadata.get("future_features", {}))
+    if not future_features.get("uses_future_weather_features"):
+        return
+    if future_weather_csv:
+        return
+    source = str(future_features.get("future_feature_source", "unknown"))
+    raise ValueError(
+        "Operational NWP-assisted inference requires --future-weather-csv or paths.future_weather_csv "
+        f"for source={source!r}; historical decoder rows cannot stand in for prepared forecast NWP inputs."
+    )
+
+
+def _validate_operational_future_weather_frame(
+    future_weather_frame: pd.DataFrame | None,
+    future_timestamps: pd.DatetimeIndex,
+    bundle: V2DatasetBundle,
+) -> None:
+    future_features = dict(bundle.metadata.get("future_features", {}))
+    required_columns = [str(column) for column in future_features.get("future_weather_feature_columns", [])]
+    if not required_columns:
+        return
+    source = str(future_features.get("future_feature_source", "unknown"))
+    if future_weather_frame is None or future_weather_frame.empty:
+        raise ValueError(f"Operational forecast source={source!r} did not provide any future weather rows.")
+    if "datetime" not in future_weather_frame.columns:
+        raise ValueError(f"Operational forecast source={source!r} must include valid_time/datetime rows.")
+
+    frame = future_weather_frame.copy()
+    frame["datetime"] = pd.to_datetime(frame["datetime"], utc=True)
+    expected_times = pd.DatetimeIndex(pd.to_datetime(future_timestamps, utc=True))
+    horizon_frame = frame.loc[frame["datetime"].isin(expected_times)]
+    observed_times = set(horizon_frame["datetime"])
+    missing_times = [timestamp.isoformat() for timestamp in expected_times if timestamp not in observed_times]
+    missing_columns = [column for column in required_columns if column not in horizon_frame.columns]
+    incomplete_columns = [
+        column
+        for column in required_columns
+        if column in horizon_frame.columns and horizon_frame[column].isna().any()
+    ]
+    if missing_times or missing_columns or incomplete_columns:
+        raise ValueError(
+            "Operational NWP-assisted inference requires prepared forecast CSV covariates for every decoder horizon. "
+            f"source={source!r}, missing_times={missing_times[:5]}, missing={missing_columns}, incomplete={incomplete_columns}."
+        )
 
 
 def _require_future_weather_covariates(decoder_frame: pd.DataFrame, bundle: V2DatasetBundle) -> None:

@@ -13,7 +13,12 @@ from weather_korea_forecast.v2.data import build_v2_training_table
 from weather_korea_forecast.v2.dataset import build_v2_dataset_bundle
 from weather_korea_forecast.v2.evaluate import evaluate_experiment, evaluate_prediction_frame
 from weather_korea_forecast.v2.future_features import build_future_feature_metadata, load_future_weather_table
-from weather_korea_forecast.v2.predict import _build_forecast_decoder_frame, generate_v2_forecast
+from weather_korea_forecast.v2.predict import (
+    _build_forecast_decoder_frame,
+    _require_operational_forecast_csv,
+    _validate_operational_future_weather_frame,
+    generate_v2_forecast,
+)
 from weather_korea_forecast.v2.train import apply_postprocessing, compute_bias_correction, train_v2_experiment
 from weather_korea_forecast.v2.target_transforms import logit_relative_humidity, relative_humidity_from_dew_point
 
@@ -637,6 +642,48 @@ def test_v2_forecast_decoder_uses_future_known_covariates(synthetic_v2_project: 
         decoder_frame["era5_t2m"].astype(float).to_numpy(),
         np.repeat(float(encoder_frame.iloc[-1]["era5_t2m"]), len(decoder_frame)),
     )
+
+
+
+
+def test_v2_operational_predict_requires_explicit_forecast_csv() -> None:
+    class OperationalBundle:
+        metadata = {
+            "future_features": {
+                "uses_future_weather_features": True,
+                "future_feature_source": "prepared_forecast_csv",
+                "future_weather_feature_columns": ["era5_t2m"],
+            }
+        }
+
+    with pytest.raises(ValueError, match="--future-weather-csv"):
+        _require_operational_forecast_csv(OperationalBundle(), operational_mode=True, future_weather_csv=None)
+
+    _require_operational_forecast_csv(OperationalBundle(), operational_mode=True, future_weather_csv="forecast.csv")
+
+
+def test_v2_operational_predict_validates_prepared_forecast_horizon_coverage() -> None:
+    class OperationalBundle:
+        metadata = {
+            "future_features": {
+                "uses_future_weather_features": True,
+                "future_feature_source": "prepared_forecast_csv",
+                "future_weather_feature_columns": ["era5_t2m", "era5_sp"],
+            }
+        }
+
+    future_timestamps = pd.date_range("2024-01-01T01:00:00Z", periods=2, freq="1h", tz="UTC")
+    incomplete_frame = pd.DataFrame(
+        [
+            {"datetime": "2024-01-01T01:00:00Z", "era5_t2m": 8.0, "era5_sp": 1013.0},
+            {"datetime": "2024-01-01T02:00:00Z", "era5_t2m": 9.0, "era5_sp": np.nan},
+        ]
+    )
+    with pytest.raises(ValueError, match="prepared forecast CSV covariates"):
+        _validate_operational_future_weather_frame(incomplete_frame, future_timestamps, OperationalBundle())
+
+    complete_frame = incomplete_frame.fillna({"era5_sp": 1014.0})
+    _validate_operational_future_weather_frame(complete_frame, future_timestamps, OperationalBundle())
 
 
 def test_v2_future_weather_decoder_requires_future_valid_covariates(synthetic_v2_project: dict[str, object]) -> None:
