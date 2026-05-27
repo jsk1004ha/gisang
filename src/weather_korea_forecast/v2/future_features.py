@@ -206,6 +206,8 @@ def _canonical_future_weather_schema() -> list[str]:
         "nwp_v10",
         "nwp_tp",
         "nwp_dew_point",
+        "nwp_relative_humidity",
+        "nwp_cloud_cover",
         "source",
         "issue_time",
     ]
@@ -228,6 +230,21 @@ def _validate_prepared_forecast_features(
     normalized["station_id"] = normalized["station_id"].astype(str)
     normalized["valid_time"] = pd.to_datetime(normalized["valid_time"], utc=True)
     normalized["horizon_step"] = normalized["horizon_step"].astype(int)
+    if "forecast_init_time" not in normalized.columns:
+        normalized["forecast_init_time"] = start
+    else:
+        normalized["forecast_init_time"] = pd.to_datetime(normalized["forecast_init_time"], utc=True)
+    if "issue_time" not in normalized.columns:
+        normalized["issue_time"] = start
+    else:
+        normalized["issue_time"] = pd.to_datetime(normalized["issue_time"], utc=True)
+    late_issue_mask = normalized["issue_time"] > normalized["forecast_init_time"]
+    if late_issue_mask.any():
+        raise ValueError("Prepared forecast CSV has issue_time later than forecast_init_time.")
+    expected_valid_times = normalized["forecast_init_time"] + pd.to_timedelta(normalized["horizon_step"], unit="h")
+    invalid_valid_times = normalized["valid_time"] != expected_valid_times
+    if invalid_valid_times.any():
+        raise ValueError("Prepared forecast CSV has valid_time rows that do not match forecast_init_time + horizon_step hours.")
     duplicate_count = int(normalized.duplicated(["station_id", "valid_time", "horizon_step"]).sum())
     if duplicate_count:
         raise ValueError(f"Prepared forecast CSV contains {duplicate_count} duplicate station/valid_time/horizon rows.")
@@ -245,14 +262,6 @@ def _validate_prepared_forecast_features(
         normalized["nwp_sp"] = normalized["nwp_sp"].astype(float) / 100.0
     if "source" not in normalized.columns:
         normalized["source"] = "prepared_forecast_csv"
-    if "forecast_init_time" not in normalized.columns:
-        normalized["forecast_init_time"] = start
-    else:
-        normalized["forecast_init_time"] = pd.to_datetime(normalized["forecast_init_time"], utc=True)
-    if "issue_time" not in normalized.columns:
-        normalized["issue_time"] = start
-    else:
-        normalized["issue_time"] = pd.to_datetime(normalized["issue_time"], utc=True)
     return normalized
 
 
@@ -430,6 +439,12 @@ def _apply_future_weather_column_mapping(frame: pd.DataFrame, config: dict[str, 
         "gfs_temp_2m_c": "nwp_temp_2m_c",
         "nwp_surface_pressure": "nwp_surface_pressure",
         "gfs_surface_pressure": "nwp_surface_pressure",
+        "cloud_cover": "nwp_cloud_cover",
+        "total_cloud_cover": "nwp_cloud_cover",
+        "tcc": "nwp_cloud_cover",
+        "nwp_tcc": "nwp_cloud_cover",
+        "gfs_tcc": "nwp_cloud_cover",
+        "gfs_cloud_cover": "nwp_cloud_cover",
         "nwp_u10": "nwp_u10",
         "gfs_u10": "nwp_u10",
         "nwp_v10": "nwp_v10",
@@ -492,6 +507,7 @@ def _add_future_weather_derived_columns(frame: pd.DataFrame) -> pd.DataFrame:
         "nwp_surface_pressure": "nwp_sp",
         "nwp_total_precipitation": "nwp_tp",
         "nwp_dew_point_2m_c": "nwp_dew_point",
+        "nwp_relative_humidity_2m": "nwp_relative_humidity",
     }
     for source_column, alias_column in alias_pairs.items():
         if source_column in enriched.columns and alias_column not in enriched.columns:
