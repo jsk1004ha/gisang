@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +70,15 @@ def _synthetic_nwp_archive(observations: pd.DataFrame, path: Path) -> Path:
                 }
             )
     pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _synthetic_patch_features(forecast_path: Path, path: Path) -> Path:
+    forecast = pd.read_csv(forecast_path)
+    patch = forecast[["station_id", "issue_time", "valid_time", "lead_hour"]].copy()
+    patch["patch_nwp_t2m_mean"] = 10.0 + patch["lead_hour"].astype(float)
+    patch["nwp_t2m_patch_mean"] = patch["patch_nwp_t2m_mean"]
+    patch.to_csv(path, index=False)
     return path
 
 
@@ -162,6 +172,54 @@ def test_nwp_mos_trains_issue_time_aligned_residual_model(monkeypatch: pytest.Mo
     assert predictions["horizon_step"].isin([1, 2, 3]).all()
     assert metadata["issue_time_aligned"] is True
     assert metadata["operational_valid"] is True
+
+
+def test_nwp_mos_frame_joins_patch_features_and_supports_ridge(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    observations = _synthetic_observation_frame()
+    forecast_path = _synthetic_nwp_archive(observations, tmp_path / "nwp.csv")
+    patch_path = _synthetic_patch_features(forecast_path, tmp_path / "patch.csv")
+    monkeypatch.setattr(nwp_mos, "load_or_prepare_v2_training_table", lambda config: observations.copy())
+    config = {
+        "experiment": {"name": "synthetic_temp_patch_mos", "version": "v4"},
+        "paths": {
+            "prepared_forecast_csv": str(forecast_path),
+            "patch_feature_csv": str(patch_path),
+            "base_training_config": "configs/v3/experiments/v3_temp_mos_residual_ridge_72to24.yaml",
+        },
+        "data": {
+            "target_name": "humidity",
+            "base_training_config": "configs/v3/experiments/v3_temp_mos_residual_ridge_72to24.yaml",
+            "window": {"prediction_length": 3},
+            "features": {
+                "nwp_features": ["nwp_relative_humidity_2m"],
+                "init_features": ["obs_humidity"],
+                "static_features": ["lat", "lon"],
+            },
+            "future_features": {
+                "track": "nwp_assisted_mos",
+                "source": "prepared_forecast_csv",
+                "operational_valid": True,
+                "schema": {"version": "v4-prepared-forecast-v1", "valid": True},
+                "weather_columns": ["nwp_relative_humidity_2m"],
+                "patch_features": {"enabled": True, "patch_size": 5, "feature_set": "summary_v1"},
+            },
+        },
+        "model": {"type": "ridge", "residual": True, "baseline_column": "nwp_relative_humidity_2m"},
+        "artifacts": {"root_dir": str(tmp_path / "artifacts")},
+    }
+
+    frame, feature_columns, audit = nwp_mos.build_nwp_mos_frame(config)
+
+    assert "patch_nwp_t2m_mean" in feature_columns
+    assert "nwp_t2m_patch_mean" in feature_columns
+    assert audit["patch_feature_rows"] > 0
+    assert frame["patch_nwp_t2m_mean"].notna().all()
+
+    experiment_dir = nwp_mos.run_nwp_mos_experiment(config)
+    metadata = json.loads((experiment_dir / "future_feature_metadata.json").read_text(encoding="utf-8"))
+    model_payload = pickle.loads((experiment_dir / "model.pkl").read_bytes())
+    assert metadata["uses_patch_features"] is True
+    assert model_payload["model_type"] == "ridge"
 
 
 def test_load_future_weather_features_adapter_returns_canonical_schema(tmp_path: Path) -> None:

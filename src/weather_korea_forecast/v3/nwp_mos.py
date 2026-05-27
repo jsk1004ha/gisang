@@ -11,7 +11,7 @@ import pandas as pd
 
 from weather_korea_forecast.training.metrics import compute_prediction_metrics
 from weather_korea_forecast.utils.config import load_yaml
-from weather_korea_forecast.utils.io import write_json, write_table
+from weather_korea_forecast.utils.io import read_table, write_json, write_table
 from weather_korea_forecast.utils.paths import resolve_path
 from weather_korea_forecast.v2.data import load_or_prepare_v2_training_table
 from weather_korea_forecast.v2.future_features import build_future_feature_metadata, load_future_weather_archive
@@ -95,7 +95,7 @@ def run_nwp_mos_experiment(config: dict[str, Any]) -> Path:
     else:
         y_train_target = y_actual
 
-    model = _build_lightgbm_model(model_config)
+    model = _build_model(model_config)
     train_mask = split_masks["train"].to_numpy()
     val_mask = split_masks["val"].to_numpy()
     test_mask = split_masks["test"].to_numpy()
@@ -115,6 +115,7 @@ def run_nwp_mos_experiment(config: dict[str, Any]) -> Path:
         "imputer": imputer,
         "baseline_column": baseline_column if residual_mode else "",
         "residual_mode": residual_mode,
+        "model_type": _normalize_model_type(model_config),
     }
     with (experiment_dir / "model.pkl").open("wb") as handle:
         pickle.dump(payload, handle)
@@ -212,6 +213,9 @@ def build_nwp_mos_frame(config: dict[str, Any]) -> tuple[pd.DataFrame, list[str]
     frame = nwp.merge(valid, on=["station_id", "valid_time"], how="inner")
     frame = frame.merge(init, on=["station_id", "issue_time"], how="inner")
     frame = frame.dropna(subset=["actual", "split"]).reset_index(drop=True)
+    patch_features = _load_patch_features(paths.get("patch_feature_csv"), frame)
+    if patch_features is not None:
+        frame = frame.merge(patch_features, on=["station_id", "issue_time", "valid_time", "lead_hour"], how="left")
 
     nwp_features = [str(c) for c in feature_config.get("nwp_features", []) if c in frame.columns]
     if not nwp_features:
@@ -221,13 +225,18 @@ def build_nwp_mos_frame(config: dict[str, Any]) -> tuple[pd.DataFrame, list[str]
             for column in frame.columns
             if column not in excluded and column.startswith(DEFAULT_NWP_FEATURE_PREFIXES)
         ]
+    patch_feature_columns = [
+        column
+        for column in frame.columns
+        if column.startswith("patch_") or "_patch_" in column
+    ]
     issue_time_features = _time_features_from_series(frame["issue_time"], prefix="issue")
     valid_time_features = _time_features_from_series(frame["valid_time"], prefix="valid")
     frame = pd.concat([frame, issue_time_features, valid_time_features], axis=1)
     time_features = list(issue_time_features.columns) + list(valid_time_features.columns)
     init_feature_columns = [f"init_{column}" for column in init_features if f"init_{column}" in frame.columns]
     static_feature_columns = [column for column in static_features if column in frame.columns]
-    feature_columns = ["lead_hour", *nwp_features, *init_feature_columns, *static_feature_columns, *time_features]
+    feature_columns = ["lead_hour", *nwp_features, *patch_feature_columns, *init_feature_columns, *static_feature_columns, *time_features]
     feature_columns = [column for column in dict.fromkeys(feature_columns) if column in frame.columns]
 
     audit = {
@@ -237,9 +246,70 @@ def build_nwp_mos_frame(config: dict[str, Any]) -> tuple[pd.DataFrame, list[str]
         "lead_hour_min": int(frame["lead_hour"].min()) if not frame.empty else None,
         "lead_hour_max": int(frame["lead_hour"].max()) if not frame.empty else None,
         "feature_columns": feature_columns,
+        "patch_feature_rows": int(len(patch_features)) if patch_features is not None else 0,
+        "patch_feature_columns": patch_feature_columns,
         "honesty_rule": "Each sample is keyed by station_id + issue_time + valid_time + lead_hour; no forecast issued after issue_time is used.",
     }
     return frame, feature_columns, audit
+
+
+def _load_patch_features(path: str | Path | None, frame: pd.DataFrame) -> pd.DataFrame | None:
+    if not path:
+        return None
+    patch = read_table(resolve_path(path)).copy()
+    if patch.empty:
+        raise ValueError("Patch feature CSV is empty.")
+    required_time = "valid_time" if "valid_time" in patch.columns else "datetime" if "datetime" in patch.columns else "timestamp" if "timestamp" in patch.columns else None
+    if required_time is None:
+        raise ValueError("Patch feature CSV requires valid_time, datetime, or timestamp.")
+    issue_column = (
+        "issue_time"
+        if "issue_time" in patch.columns
+        else "forecast_init_time"
+        if "forecast_init_time" in patch.columns
+        else "model_run_time"
+        if "model_run_time" in patch.columns
+        else None
+    )
+    if issue_column is None:
+        raise ValueError("Patch feature CSV requires issue_time or forecast_init_time.")
+    horizon_column = "lead_hour" if "lead_hour" in patch.columns else "horizon_step" if "horizon_step" in patch.columns else None
+    if horizon_column is None:
+        raise ValueError("Patch feature CSV requires lead_hour or horizon_step.")
+    patch["station_id"] = patch["station_id"].astype(str)
+    patch["issue_time"] = pd.to_datetime(patch[issue_column], utc=True)
+    patch["valid_time"] = pd.to_datetime(patch[required_time], utc=True)
+    patch["lead_hour"] = patch[horizon_column].astype(int)
+    expected_valid_time = patch["issue_time"] + pd.to_timedelta(patch["lead_hour"], unit="h")
+    if (patch["valid_time"] != expected_valid_time).any():
+        raise ValueError("Patch feature CSV valid_time must equal issue_time + lead_hour hours.")
+    key_columns = ["station_id", "issue_time", "valid_time", "lead_hour"]
+    duplicate_count = int(patch.duplicated(key_columns).sum())
+    if duplicate_count:
+        raise ValueError(f"Patch feature CSV contains {duplicate_count} duplicate station/issue/valid/lead rows.")
+    metadata_columns = set(key_columns) | {
+        "forecast_init_time",
+        "horizon_step",
+        "source",
+        "patch_size",
+        "patch_feature_set",
+        "feature_set",
+    }
+    candidate_columns = [
+        column
+        for column in patch.columns
+        if column not in metadata_columns and (column.startswith("patch_") or "_patch_" in column)
+    ]
+    if not candidate_columns:
+        raise ValueError("Patch feature CSV has no patch summary columns.")
+    patch = patch[key_columns + candidate_columns].copy()
+    # Keep only keys that can join to the NWP/observation frame so a stale patch
+    # artifact fails by producing zero usable feature rows in the audit/tests.
+    frame_keys = frame[key_columns].drop_duplicates()
+    patch = patch.merge(frame_keys, on=key_columns, how="inner")
+    if patch.empty:
+        raise ValueError("Patch feature CSV has no rows matching the NWP MOS frame keys.")
+    return patch
 
 
 def _time_features_from_series(series: pd.Series, prefix: str) -> pd.DataFrame:
@@ -268,6 +338,65 @@ def _build_feature_matrix(frame: pd.DataFrame, feature_columns: list[str], train
     encoded = encoded.fillna(imputer).fillna(0.0)
     encoded = encoded.replace([np.inf, -np.inf], 0.0)
     return encoded.to_numpy(dtype=np.float32), encoded.columns.tolist(), {str(k): float(v) for k, v in imputer.items()}
+
+
+def _normalize_model_type(model_config: dict[str, Any]) -> str:
+    return str(model_config.get("type") or model_config.get("model_type") or "nwp_mos_lightgbm").lower()
+
+
+def _build_model(model_config: dict[str, Any]):
+    model_type = _normalize_model_type(model_config)
+    if model_type == "ridge":
+        return _build_ridge_model(model_config)
+    if model_type in {"horizon_wise_ridge", "horizonwise_ridge"}:
+        return _HorizonWiseRegressor(_build_ridge_model(model_config), lead_column_index=0)
+    if model_type in {"lightgbm", "lgbm", "nwp_mos_lightgbm", "nwp_mos_lgbm"}:
+        return _build_lightgbm_model(model_config)
+    raise ValueError(f"Unsupported NWP MOS model type: {model_type!r}.")
+
+
+def _build_ridge_model(model_config: dict[str, Any]):
+    from sklearn.linear_model import Ridge
+
+    alpha = float(model_config.get("alpha", 1.0))
+    alpha_grid = model_config.get("alpha_grid")
+    if isinstance(alpha_grid, list) and alpha_grid:
+        alpha = float(alpha_grid[0])
+    return Ridge(alpha=alpha)
+
+
+class _HorizonWiseRegressor:
+    def __init__(self, base_model: Any, lead_column_index: int = 0) -> None:
+        self.base_model = base_model
+        self.lead_column_index = lead_column_index
+        self.models_: dict[int, Any] = {}
+        self.global_model_: Any | None = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "_HorizonWiseRegressor":
+        from sklearn.base import clone
+
+        self.global_model_ = clone(self.base_model)
+        self.global_model_.fit(X, y)
+        leads = X[:, self.lead_column_index].astype(int)
+        for lead in sorted(set(leads.tolist())):
+            mask = leads == lead
+            if int(mask.sum()) < 2:
+                continue
+            model = clone(self.base_model)
+            model.fit(X[mask], y[mask])
+            self.models_[int(lead)] = model
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.global_model_ is None:
+            raise RuntimeError("Horizon-wise model has not been fitted.")
+        predictions = np.asarray(self.global_model_.predict(X), dtype=float)
+        leads = X[:, self.lead_column_index].astype(int)
+        for lead, model in self.models_.items():
+            mask = leads == lead
+            if bool(mask.any()):
+                predictions[mask] = np.asarray(model.predict(X[mask]), dtype=float)
+        return predictions
 
 
 def _build_lightgbm_model(model_config: dict[str, Any]):
