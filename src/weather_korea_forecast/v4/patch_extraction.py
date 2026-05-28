@@ -160,18 +160,22 @@ def patches_to_feature_table(
             patch_std = float(finite.std(ddof=0)) if not finite.empty else np.nan
             patch_min = float(finite.min()) if not finite.empty else np.nan
             patch_max = float(finite.max()) if not finite.empty else np.nan
+            patch_sum = float(finite.sum()) if not finite.empty else np.nan
             patch_range = patch_max - patch_min if pd.notna(patch_max) and pd.notna(patch_min) else np.nan
             gradient_x = _patch_axis_gradient(variable_rows, axis="col_offset")
             gradient_y = _patch_axis_gradient(variable_rows, axis="row_offset")
+            upwind_mean = _patch_upwind_mean(variable_rows)
             for feature_name, feature_value in {
                 "center": patch_center,
                 "mean": patch_mean,
                 "std": patch_std,
                 "min": patch_min,
                 "max": patch_max,
+                "sum": patch_sum,
                 "range": patch_range,
                 "gradient_x": gradient_x,
                 "gradient_y": gradient_y,
+                "upwind_mean": upwind_mean,
             }.items():
                 row[f"{prefix}_patch_{feature_name}"] = feature_value
                 row[f"patch_{prefix}_{feature_name}"] = feature_value
@@ -189,6 +193,15 @@ def _patch_axis_gradient(variable_rows: pd.DataFrame, *, axis: str) -> float:
     if positive.empty or negative.empty:
         return np.nan
     return float(positive.mean() - negative.mean())
+
+
+def _patch_upwind_mean(variable_rows: pd.DataFrame) -> float:
+    upwind = variable_rows.loc[
+        variable_rows["row_offset"].astype(int).le(0) & variable_rows["col_offset"].astype(int).le(0),
+        "value",
+    ]
+    finite = pd.to_numeric(upwind, errors="coerce").dropna()
+    return float(finite.mean()) if not finite.empty else np.nan
 
 
 def _validate_patch_size(patch_size: int) -> None:

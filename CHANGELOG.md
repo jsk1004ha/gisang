@@ -1,3 +1,20 @@
+## G025 - Operational Model Accuracy Sprint
+
+### Added
+- Added true GFS GRIB-grid patch extraction utilities for station-centered 3x3/5x5 patch summaries.
+- Added operational runner support for `--grid-patch-features`, explicit `patch_feature_mode` reporting, optional CatBoost residual baselines, and ensemble artifacts.
+- Added medium-archive time-ordered splitting so 90-cycle benchmarks use all cycles instead of silently falling back to the 30-cycle short split.
+- Added G025 operational accuracy documentation and tests for true patch extraction, optional CatBoost skip, ensemble artifacts, and medium reliability gates.
+
+### Changed
+- Residual LightGBM remains the official operational MOS baseline, while Ridge stays in debug/reference unless it beats raw GFS.
+- V4-C and site-readiness gates now consume best operational model metrics while still requiring benchmark reliability at least `medium`.
+
+### Verified
+- `PYTHONPATH=src .venv312/Scripts/python.exe -m ruff check .`
+- `PYTHONPATH=src .venv312/Scripts/python.exe -m compileall src tests`
+- `PYTHONPATH=src .venv312/Scripts/python.exe -m pytest -q` (212 passed, 64 warnings)
+
 # Changelog
 
 ## 2026-05-28

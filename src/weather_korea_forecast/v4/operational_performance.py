@@ -17,10 +17,17 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from weather_korea_forecast.v4.gfs_grid_patch import PATCH_FEATURE_MODE
+
 try:  # pragma: no cover - dependency is present in normal dev env, optional in minimal envs.
     from lightgbm import LGBMRegressor
 except Exception:  # noqa: BLE001
     LGBMRegressor = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency.
+    from catboost import CatBoostRegressor
+except Exception:  # noqa: BLE001
+    CatBoostRegressor = None  # type: ignore[assignment]
 
 TARGETS = {
     "temp": {"actual": "temp", "baseline": "nwp_t2m", "official_raw": "raw_gfs_t2m", "official_lgbm": "operational_residual_lgbm_temp"},
@@ -50,12 +57,13 @@ BASE_FEATURES = [
     "valid_doy_cos",
 ]
 DEFAULT_LGBM_GRID = [
-    {"num_leaves": 15, "max_depth": 4, "learning_rate": 0.05, "n_estimators": 350, "min_child_samples": 20, "subsample": 0.9, "colsample_bytree": 0.9, "reg_alpha": 0.0, "reg_lambda": 0.0},
-    {"num_leaves": 31, "max_depth": -1, "learning_rate": 0.03, "n_estimators": 500, "min_child_samples": 20, "subsample": 0.9, "colsample_bytree": 0.9, "reg_alpha": 0.0, "reg_lambda": 0.0},
-    {"num_leaves": 31, "max_depth": 6, "learning_rate": 0.03, "n_estimators": 700, "min_child_samples": 10, "subsample": 0.95, "colsample_bytree": 0.95, "reg_alpha": 0.0, "reg_lambda": 0.1},
-    {"num_leaves": 63, "max_depth": -1, "learning_rate": 0.02, "n_estimators": 800, "min_child_samples": 15, "subsample": 0.9, "colsample_bytree": 0.9, "reg_alpha": 0.0, "reg_lambda": 0.1},
-    {"num_leaves": 63, "max_depth": 8, "learning_rate": 0.03, "n_estimators": 600, "min_child_samples": 8, "subsample": 0.85, "colsample_bytree": 0.9, "reg_alpha": 0.05, "reg_lambda": 0.2},
-    {"num_leaves": 127, "max_depth": 10, "learning_rate": 0.02, "n_estimators": 900, "min_child_samples": 8, "subsample": 0.9, "colsample_bytree": 0.85, "reg_alpha": 0.05, "reg_lambda": 0.5},
+    {"num_leaves": 15, "max_depth": 4, "learning_rate": 0.05, "n_estimators": 350, "min_child_samples": 20, "subsample": 0.9, "colsample_bytree": 0.9, "reg_alpha": 0.0, "reg_lambda": 0.0, "min_split_gain": 0.0},
+    {"num_leaves": 31, "max_depth": -1, "learning_rate": 0.03, "n_estimators": 500, "min_child_samples": 20, "subsample": 0.9, "colsample_bytree": 0.9, "reg_alpha": 0.0, "reg_lambda": 0.0, "min_split_gain": 0.0},
+    {"num_leaves": 31, "max_depth": 6, "learning_rate": 0.03, "n_estimators": 700, "min_child_samples": 10, "subsample": 0.95, "colsample_bytree": 0.95, "reg_alpha": 0.0, "reg_lambda": 0.1, "min_split_gain": 0.0},
+    {"num_leaves": 63, "max_depth": -1, "learning_rate": 0.02, "n_estimators": 800, "min_child_samples": 15, "subsample": 0.9, "colsample_bytree": 0.9, "reg_alpha": 0.0, "reg_lambda": 0.1, "min_split_gain": 0.0},
+    {"num_leaves": 63, "max_depth": 8, "learning_rate": 0.03, "n_estimators": 600, "min_child_samples": 8, "subsample": 0.85, "colsample_bytree": 0.9, "reg_alpha": 0.05, "reg_lambda": 0.2, "min_split_gain": 0.01},
+    {"num_leaves": 127, "max_depth": 10, "learning_rate": 0.02, "n_estimators": 900, "min_child_samples": 8, "subsample": 0.9, "colsample_bytree": 0.85, "reg_alpha": 0.05, "reg_lambda": 0.5, "min_split_gain": 0.0},
+    {"num_leaves": 127, "max_depth": -1, "learning_rate": 0.015, "n_estimators": 1200, "min_child_samples": 6, "subsample": 0.85, "colsample_bytree": 0.8, "reg_alpha": 0.1, "reg_lambda": 0.8, "min_split_gain": 0.02},
 ]
 CALIBRATION_CANDIDATES = [
     "none",
@@ -65,8 +73,11 @@ CALIBRATION_CANDIDATES = [
     "per_region_horizon_mean_bias",
     "global_affine",
     "per_station_horizon_affine",
+    "per_region_horizon_affine",
+    "per_station_month_hour_mean_bias",
     "quantile_mapping",
     "isotonic",
+    "isotonic_calibration",
 ]
 LGBM_GRID_RESULT_COLUMNS = {
     "grid_index",
@@ -79,6 +90,7 @@ LGBM_GRID_RESULT_COLUMNS = {
     "colsample_bytree",
     "reg_alpha",
     "reg_lambda",
+    "min_split_gain",
     "val_rmse",
     "val_mae",
     "val_bias",
@@ -108,7 +120,7 @@ class CalibrationModel:
             if len(source) < 2 or len(target) < 2:
                 return prediction
             return np.interp(prediction, source, target, left=target[0], right=target[-1])
-        if self.name == "isotonic":
+        if self.name in {"isotonic", "isotonic_calibration"}:
             model = self.payload.get("model")
             if model is None:
                 return prediction
@@ -135,6 +147,13 @@ class CalibrationModel:
                 horizon = int(getattr(row, "horizon_step"))
                 key = f"{region}|{horizon}"
                 adjustments[i] = float(groups.get(key, horizon_groups.get(str(horizon), global_bias)))
+        elif self.name == "per_station_month_hour_mean_bias":
+            station_groups = self.payload.get("station_groups", {}) or {}
+            for i, row in enumerate(frame.itertuples(index=False)):
+                timestamp = pd.Timestamp(getattr(row, "valid_time"))
+                key = f"{getattr(row, 'station_id')}|{int(timestamp.month)}|{int(timestamp.hour)}"
+                station_key = str(getattr(row, "station_id"))
+                adjustments[i] = float(groups.get(key, station_groups.get(station_key, global_bias)))
         return adjustments
 
     def _lookup_affine(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -148,6 +167,14 @@ class CalibrationModel:
                 params = groups.get(key, default)
                 slopes[i] = float(params.get("slope", slopes[i]))
                 intercepts[i] = float(params.get("intercept", intercepts[i]))
+        elif self.name == "per_region_horizon_affine":
+            region_col = self.payload.get("region_column")
+            if region_col and str(region_col) in frame.columns:
+                for i, row in enumerate(frame.itertuples(index=False)):
+                    key = f"{getattr(row, str(region_col))}|{int(getattr(row, 'horizon_step'))}"
+                    params = groups.get(key, default)
+                    slopes[i] = float(params.get("slope", slopes[i]))
+                    intercepts[i] = float(params.get("intercept", intercepts[i]))
         return slopes, intercepts
 
     def to_jsonable(self) -> dict[str, Any]:
@@ -293,10 +320,11 @@ def residual_debug_summary(
 
 def evaluate_v4c_gate(summary: dict[str, Any]) -> dict[str, Any]:
     baselines = summary.get("official_baselines", {}) if isinstance(summary.get("official_baselines"), dict) else {}
+    best_models = summary.get("best_operational_models", {}) if isinstance(summary.get("best_operational_models"), dict) else {}
     temp = baselines.get("temp", {}) if isinstance(baselines.get("temp"), dict) else {}
     humidity = baselines.get("humidity", {}) if isinstance(baselines.get("humidity"), dict) else {}
-    temp_lgbm = temp.get("operational_residual_lgbm_temp", {}) if isinstance(temp.get("operational_residual_lgbm_temp"), dict) else {}
-    humidity_lgbm = humidity.get("operational_residual_lgbm_humidity", {}) if isinstance(humidity.get("operational_residual_lgbm_humidity"), dict) else {}
+    temp_lgbm = best_models.get("temp") if isinstance(best_models.get("temp"), dict) else temp.get("operational_residual_lgbm_temp", {})
+    humidity_lgbm = best_models.get("humidity") if isinstance(best_models.get("humidity"), dict) else humidity.get("operational_residual_lgbm_humidity", {})
     reliability = str(summary.get("benchmark_reliability") or "smoke")
     conditions = {
         "operational_valid=true temp model exists": temp_lgbm.get("rmse") is not None,
@@ -312,16 +340,19 @@ def evaluate_v4c_gate(summary: dict[str, Any]) -> dict[str, Any]:
 
 def evaluate_site_readiness_gate(summary: dict[str, Any]) -> dict[str, Any]:
     baselines = summary.get("official_baselines", {}) if isinstance(summary.get("official_baselines"), dict) else {}
+    best_models = summary.get("best_operational_models", {}) if isinstance(summary.get("best_operational_models"), dict) else {}
     temp = baselines.get("temp", {}) if isinstance(baselines.get("temp"), dict) else {}
     humidity = baselines.get("humidity", {}) if isinstance(baselines.get("humidity"), dict) else {}
-    temp_lgbm = temp.get("operational_residual_lgbm_temp", {}) if isinstance(temp.get("operational_residual_lgbm_temp"), dict) else {}
-    humidity_lgbm = humidity.get("operational_residual_lgbm_humidity", {}) if isinstance(humidity.get("operational_residual_lgbm_humidity"), dict) else {}
+    temp_lgbm = best_models.get("temp") if isinstance(best_models.get("temp"), dict) else temp.get("operational_residual_lgbm_temp", {})
+    humidity_lgbm = best_models.get("humidity") if isinstance(best_models.get("humidity"), dict) else humidity.get("operational_residual_lgbm_humidity", {})
     reliability = str(summary.get("benchmark_reliability") or "smoke")
     conditions = {
         "temp operational_valid=true": temp_lgbm.get("rmse") is not None,
         "temp RMSE <= 1.5": temp_lgbm.get("rmse") is not None and float(temp_lgbm["rmse"]) <= 1.5,
         "humidity RMSE <= 10 beta": humidity_lgbm.get("rmse") is not None and float(humidity_lgbm["rmse"]) <= 10.0,
         "benchmark_reliability >= medium": reliability in {"medium", "strong", "seasonal"},
+        "patch_ablation_completed": bool(summary.get("patch_ablation_completed")),
+        "report_generated": bool(summary.get("artifacts", {}).get("html_report")) if isinstance(summary.get("artifacts"), dict) else False,
         "weather_code rule-based allowed": True,
     }
     missing = [name for name, ok in conditions.items() if not ok]
@@ -346,6 +377,8 @@ def write_operational_performance_html(summary: dict[str, Any], output_path: str
         _html_section("Calibration", summary.get("calibration", {})),
         _html_section("Patch Ablation", summary.get("patch_ablation", {})),
         _html_section("Patch Improvement", summary.get("patch_improvement", {})),
+        _html_section("Ensembles", summary.get("ensembles", {})),
+        _html_section("CatBoost", summary.get("catboost", {})),
         _html_section("Ridge Residual Debug", summary.get("ridge_debug", {})),
         _html_section("Artifacts", summary.get("artifacts", {})),
         "</body></html>",
@@ -362,6 +395,7 @@ def run_operational_benchmark(
     station_metadata: str | Path,
     output_dir: str | Path,
     lgbm_grid: list[dict[str, Any]] | None = None,
+    grid_patch_features: str | Path | None = None,
 ) -> dict[str, Any]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -370,6 +404,7 @@ def run_operational_benchmark(
         raise ValueError(f"forecast archive is inadequate: {quality.get('blocking_reasons')}")
     frame = load_joined_operational_frame(nwp_archive=nwp_archive, observations=observations, station_metadata=station_metadata)
     frame = add_time_ordered_splits(frame, train_cycles=20, val_cycles=5, test_cycles=5)
+    frame, true_patch_features = _with_true_grid_patch_features(frame, grid_patch_features)
     benchmark = _benchmark_info(frame)
     models: dict[str, Any] = {}
     predictions = frame.loc[frame["split"].eq("test"), ["station_id", "issue_time", "valid_time", "horizon_step", "temp", "humidity", "nwp_t2m", "nwp_humidity"]].copy()
@@ -384,6 +419,7 @@ def run_operational_benchmark(
             "horizon_min": int(frame["horizon_step"].min()),
             "horizon_max": int(frame["horizon_step"].max()),
             "split_rows": {str(k): int(v) for k, v in frame["split"].value_counts().to_dict().items()},
+            "split_cycles": {str(k): int(v) for k, v in frame.groupby("split")["issue_time"].nunique().to_dict().items()},
         },
         **benchmark,
         "official_baselines": {"temp": {}, "humidity": {}},
@@ -391,12 +427,30 @@ def run_operational_benchmark(
         "calibration": {},
         "patch_ablation": {},
         "patch_improvement": {},
-        "patch_ablation_completed": True,
+        "patch_ablation_completed": False,
+        "patch_modes_present": [],
+        "patch_ablation_required_modes": ["no_patch", "proxy_patch5", "true_patch3", "true_patch5"],
+        "patch_ablation_missing_modes": ["no_patch", "proxy_patch5", "true_patch3", "true_patch5"],
+        "catboost": {},
+        "ensembles": {},
+        "best_operational_models": {},
         "ridge_debug": {},
         "artifacts": {},
     }
     grid = lgbm_grid or DEFAULT_LGBM_GRID
-    patch_modes = {"no_patch": [], "patch3": _station_neighbor_features(frame, 3), "patch5": _station_neighbor_features(frame, 5)}
+    patch_modes = [
+        {"mode": "no_patch", "feature_columns": [], "patch_feature_mode": "none"},
+        {"mode": "proxy_patch5", "feature_columns": _station_neighbor_features(frame, 5), "patch_feature_mode": "station_neighborhood_proxy"},
+    ]
+    for patch_size in sorted(true_patch_features):
+        patch_modes.append(
+            {
+                "mode": f"true_patch{patch_size}",
+                "feature_columns": true_patch_features[patch_size],
+                "patch_feature_mode": PATCH_FEATURE_MODE,
+            }
+        )
+    summary.update(patch_ablation_status([str(mode["mode"]) for mode in patch_modes]))
     for target_name, target_cfg in TARGETS.items():
         actual = target_cfg["actual"]
         baseline = target_cfg["baseline"]
@@ -417,9 +471,14 @@ def run_operational_benchmark(
         best_summary: dict[str, Any] | None = None
         best_model: Pipeline | None = None
         best_test_prediction: np.ndarray | None = None
+        best_validation_rmse = float("inf")
         ablation_rows: list[dict[str, Any]] = []
         feature_importance_rows: list[pd.DataFrame] = []
-        for mode, extra_features in patch_modes.items():
+        component_predictions: dict[str, dict[str, pd.DataFrame]] = {}
+        for patch_mode in patch_modes:
+            mode = str(patch_mode["mode"])
+            extra_features = list(patch_mode["feature_columns"])
+            patch_feature_mode = str(patch_mode["patch_feature_mode"])
             feature_cols = [column for column in [*BASE_FEATURES, *extra_features] if column in frame.columns]
             tuning = _tune_lgbm(frame, actual_column=actual, baseline_column=baseline, feature_columns=feature_cols, grid=grid)
             model = tuning["model"]
@@ -437,29 +496,40 @@ def run_operational_benchmark(
                 prediction_column="prediction",
                 candidates=CALIBRATION_CANDIDATES,
             )
+            corrected_holdout = calibration.selected.apply(holdout_frame)
+            use_corrected = calibration.selected_name != "none"
+            final_holdout = corrected_holdout if use_corrected else holdout_frame["prediction"].to_numpy(dtype=float)
             test_frame = tuning["test_prediction_frame"].copy()
             corrected_test = calibration.selected.apply(test_frame)
             test_metrics_raw = metric_dict(test_frame[actual], test_frame["prediction"])
             test_metrics_corrected = metric_dict(test_frame[actual], corrected_test)
-            use_corrected = calibration.selected_name != "none"
             final_prediction = corrected_test if use_corrected else test_frame["prediction"].to_numpy(dtype=float)
             final_metrics = test_metrics_corrected if use_corrected else test_metrics_raw
+            holdout_metrics = metric_dict(holdout_frame[actual], final_holdout)
             worst_station = _worst_group_rmse(test_frame.assign(final_prediction=final_prediction), actual, "final_prediction", "station_id")
             late_horizon = test_frame.loc[test_frame["horizon_step"].between(12, 24)].copy()
             late_metrics = metric_dict(late_horizon[actual], pd.Series(final_prediction, index=test_frame.index).loc[late_horizon.index])
             ablation = {
                 "target": target_name,
                 "mode": mode,
+                "patch_feature_mode": patch_feature_mode,
                 "rmse": final_metrics["rmse"],
                 "mae": final_metrics["mae"],
                 "bias": final_metrics["bias"],
                 "worst_station_rmse": worst_station,
                 "late_horizon_rmse": late_metrics["rmse"],
                 "selected_calibration": calibration.selected_name if use_corrected else "none_holdout_not_improved",
+                "selection_holdout_rmse": holdout_metrics["rmse"],
                 "best_params": tuning["best_params"],
                 "validation_rmse": tuning["best_validation_rmse"],
                 "feature_count": len(feature_cols),
             }
+            component_name = f"lgbm_{mode}"
+            holdout_component = holdout_frame.copy()
+            holdout_component["prediction"] = final_holdout
+            test_component = test_frame.copy()
+            test_component["prediction"] = final_prediction
+            component_predictions[component_name] = {"val": holdout_component, "test": test_component}
             ablation_rows.append(ablation)
             _write_candidate_rows(calibration.candidate_results, output / f"{target_name}_{mode}_calibration_candidate_results.csv")
             _write_grid_rows(tuning["grid_results"], output / f"{target_name}_{mode}_lgbm_grid_search_results.csv")
@@ -468,11 +538,12 @@ def run_operational_benchmark(
                 fi.insert(0, "target", target_name)
                 fi.insert(1, "mode", mode)
                 feature_importance_rows.append(fi)
-            if best_summary is None or float(final_metrics["rmse"]) < float(best_summary["rmse"]):
+            if float(holdout_metrics["rmse"]) < best_validation_rmse:
                 best_mode = mode
                 best_summary = ablation
                 best_model = model
                 best_test_prediction = final_prediction
+                best_validation_rmse = float(holdout_metrics["rmse"])
                 summary["calibration"][target_name] = {
                     "mode": mode,
                     "selected": calibration.selected.to_jsonable() if use_corrected else CalibrationModel("none", {}).to_jsonable(),
@@ -483,6 +554,18 @@ def run_operational_benchmark(
                 }
         if best_summary is None or best_model is None or best_test_prediction is None:
             raise RuntimeError(f"No LGBM model was trained for {target_name}.")
+        catboost_payload = _fit_optional_catboost(frame, actual_column=actual, baseline_column=baseline, feature_columns=[column for column in BASE_FEATURES if column in frame.columns])
+        summary["catboost"][target_name] = catboost_payload["summary"]
+        if catboost_payload.get("model") is not None:
+            component_predictions["catboost_residual"] = {
+                "val": catboost_payload["val_prediction_frame"],
+                "test": catboost_payload["test_prediction_frame"],
+            }
+            models[f"{target_name}_catboost"] = catboost_payload["model"]
+        ensemble_payload = build_ensemble_results(component_predictions, actual_column=actual, output_dir=output, target_name=target_name)
+        summary["ensembles"][target_name] = ensemble_payload["summary"]
+        if ensemble_payload["best_test_prediction"] is not None:
+            predictions[f"{target_name}_ensemble_prediction"] = ensemble_payload["best_test_prediction"]
         summary["official_baselines"][target_name][lgbm_name] = {
             "rmse": best_summary["rmse"],
             "mae": best_summary["mae"],
@@ -491,6 +574,15 @@ def run_operational_benchmark(
             "patch_mode": best_mode,
             "selected_calibration": best_summary["selected_calibration"],
         }
+        best_operational = {
+            "model": lgbm_name,
+            "validation_rmse": best_validation_rmse,
+            **summary["official_baselines"][target_name][lgbm_name],
+        }
+        ensemble_best = ensemble_payload["summary"].get("best") if isinstance(ensemble_payload["summary"], dict) else None
+        if isinstance(ensemble_best, dict) and ensemble_best.get("validation_rmse") is not None and float(ensemble_best["validation_rmse"]) < best_operational["validation_rmse"]:
+            best_operational = {"model": f"ensemble_{ensemble_best['method']}", **ensemble_best}
+        summary["best_operational_models"][target_name] = best_operational
         summary["metrics"][lgbm_name] = {"test": summary["official_baselines"][target_name][lgbm_name]}
         summary["patch_ablation"][target_name] = ablation_rows
         summary["patch_improvement"][target_name] = summarize_patch_ablation_results(ablation_rows)
@@ -554,13 +646,88 @@ def add_time_ordered_splits(frame: pd.DataFrame, *, train_cycles: int, val_cycle
     needed = train_cycles + val_cycles + test_cycles
     if len(cycles) < needed:
         raise ValueError(f"Need at least {needed} forecast cycles; got {len(cycles)}")
-    selected = cycles[-needed:]
-    split_map = {cycle: "train" for cycle in selected[:train_cycles]}
-    split_map.update({cycle: "val" for cycle in selected[train_cycles : train_cycles + val_cycles]})
-    split_map.update({cycle: "test" for cycle in selected[train_cycles + val_cycles :]})
+    selected = cycles if len(cycles) > needed else cycles[-needed:]
+    if len(selected) == needed:
+        train_count, val_count, test_count = train_cycles, val_cycles, test_cycles
+    else:
+        total = len(selected)
+        test_count = max(test_cycles, int(np.ceil(total * 0.15)))
+        val_count = max(val_cycles, int(np.ceil(total * 0.15)))
+        train_count = total - val_count - test_count
+        if train_count < train_cycles:
+            train_count = train_cycles
+            remaining = total - train_count
+            val_count = max(1, remaining // 2)
+            test_count = max(1, remaining - val_count)
+    split_map = {cycle: "train" for cycle in selected[:train_count]}
+    split_map.update({cycle: "val" for cycle in selected[train_count : train_count + val_count]})
+    split_map.update({cycle: "test" for cycle in selected[train_count + val_count : train_count + val_count + test_count]})
     output = output.loc[output["issue_time"].isin(selected)].copy()
     output["split"] = output["issue_time"].map(split_map)
     return output
+
+
+def _with_true_grid_patch_features(frame: pd.DataFrame, feature_csv: str | Path | None) -> tuple[pd.DataFrame, dict[int, list[str]]]:
+    if feature_csv is None:
+        return frame, {}
+    path = Path(feature_csv)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    features = pd.read_csv(path, dtype={"station_id": str})
+    if features.empty:
+        return frame, {}
+    if "patch_feature_mode" not in features.columns:
+        raise ValueError(f"{path} is missing patch_feature_mode; true GFS grid patch features must declare provenance.")
+    modes = {str(value) for value in features["patch_feature_mode"].dropna().unique()}
+    if modes != {PATCH_FEATURE_MODE}:
+        raise ValueError(f"{path} contains non-true-grid patch_feature_mode values: {sorted(modes)}")
+    if "patch_size" not in features.columns:
+        raise ValueError(f"{path} is missing patch_size; true GFS grid patch features must include patch size.")
+    for column in ["forecast_init_time", "valid_time"]:
+        if column in features.columns:
+            features[column] = pd.to_datetime(features[column], utc=True)
+    features["station_id"] = features["station_id"].astype(str)
+    features["horizon_step"] = pd.to_numeric(features["horizon_step"], errors="coerce").astype("Int64")
+    id_columns = {"station_id", "forecast_init_time", "valid_time", "horizon_step", "source", "patch_size", "patch_feature_mode"}
+    numeric_feature_columns = [
+        column
+        for column in features.columns
+        if column not in id_columns and pd.api.types.is_numeric_dtype(features[column])
+    ]
+    if not numeric_feature_columns:
+        raise ValueError(f"{path} contains no numeric true-grid patch feature columns.")
+    output: dict[int, list[str]] = {}
+    merged_frame = frame.copy()
+    for patch_size, group in features.groupby("patch_size"):
+        size = int(patch_size)
+        rename = {column: f"true_patch{size}_{column}" for column in numeric_feature_columns}
+        subset = (
+            group[["station_id", "forecast_init_time", "valid_time", "horizon_step", *numeric_feature_columns]]
+            .drop_duplicates(["station_id", "forecast_init_time", "valid_time", "horizon_step"], keep="last")
+            .rename(columns=rename)
+        )
+        before_columns = set(merged_frame.columns)
+        merged_frame = merged_frame.merge(
+            subset,
+            on=["station_id", "forecast_init_time", "valid_time", "horizon_step"],
+            how="left",
+        )
+        output[size] = [column for column in merged_frame.columns if column not in before_columns and column.startswith(f"true_patch{size}_")]
+        if not output[size]:
+            raise ValueError(f"{path} patch_size={size} did not contribute numeric true-grid patch features.")
+    return merged_frame.copy(), output
+
+
+def patch_ablation_status(modes: Iterable[str]) -> dict[str, Any]:
+    required = ["no_patch", "proxy_patch5", "true_patch3", "true_patch5"]
+    present = sorted({str(mode) for mode in modes})
+    missing = [mode for mode in required if mode not in present]
+    return {
+        "patch_ablation_completed": not missing,
+        "patch_modes_present": present,
+        "patch_ablation_required_modes": required,
+        "patch_ablation_missing_modes": missing,
+    }
 
 
 def _fit_calibration_model(frame: pd.DataFrame, *, actual_column: str, prediction_column: str, name: str) -> CalibrationModel:
@@ -580,6 +747,21 @@ def _fit_calibration_model(frame: pd.DataFrame, *, actual_column: str, predictio
         groups = residual.groupby(key).mean().to_dict()
         horizon_groups = residual.groupby(frame["horizon_step"].astype(int).astype(str)).mean().to_dict()
         return CalibrationModel(name=name, payload={"global_bias": global_bias, "groups": {str(k): float(v) for k, v in groups.items()}, "horizon_groups": {str(k): float(v) for k, v in horizon_groups.items()}}, actual_column=actual_column, prediction_column=prediction_column)
+    if name == "per_station_month_hour_mean_bias":
+        valid_time = pd.to_datetime(frame["valid_time"], utc=True)
+        key = frame["station_id"].astype(str) + "|" + valid_time.dt.month.astype(str) + "|" + valid_time.dt.hour.astype(str)
+        groups = residual.groupby(key).mean().to_dict()
+        station_groups = residual.groupby(frame["station_id"].astype(str)).mean().to_dict()
+        return CalibrationModel(
+            name=name,
+            payload={
+                "global_bias": global_bias,
+                "groups": {str(k): float(v) for k, v in groups.items()},
+                "station_groups": {str(k): float(v) for k, v in station_groups.items()},
+            },
+            actual_column=actual_column,
+            prediction_column=prediction_column,
+        )
     if name == "per_region_horizon_mean_bias":
         region_col = "region_class" if "region_class" in frame.columns else "region" if "region" in frame.columns else None
         if region_col is None:
@@ -598,10 +780,26 @@ def _fit_calibration_model(frame: pd.DataFrame, *, actual_column: str, predictio
             groups[str(key_value)] = {"slope": slope, "intercept": intercept}
         slope, intercept = _fit_affine(prediction.to_numpy(), actual.to_numpy())
         return CalibrationModel(name=name, payload={"global": {"slope": slope, "intercept": intercept}, "groups": groups}, actual_column=actual_column, prediction_column=prediction_column)
+    if name == "per_region_horizon_affine":
+        region_col = "region_class" if "region_class" in frame.columns else "region" if "region" in frame.columns else None
+        if region_col is None:
+            return _fit_calibration_model(frame, actual_column=actual_column, prediction_column=prediction_column, name="global_affine")
+        groups = {}
+        group_key = frame[region_col].astype(str) + "|" + frame["horizon_step"].astype(int).astype(str)
+        for key_value, group in frame.groupby(group_key):
+            slope, intercept = _fit_affine(group[prediction_column].to_numpy(dtype=float), group[actual_column].to_numpy(dtype=float))
+            groups[str(key_value)] = {"slope": slope, "intercept": intercept}
+        slope, intercept = _fit_affine(prediction.to_numpy(), actual.to_numpy())
+        return CalibrationModel(
+            name=name,
+            payload={"global": {"slope": slope, "intercept": intercept}, "groups": groups, "region_column": region_col},
+            actual_column=actual_column,
+            prediction_column=prediction_column,
+        )
     if name == "quantile_mapping":
         quantiles = np.linspace(0, 1, 21)
         return CalibrationModel(name=name, payload={"prediction_quantiles": np.quantile(prediction.dropna(), quantiles).tolist(), "actual_quantiles": np.quantile(actual.dropna(), quantiles).tolist()}, actual_column=actual_column, prediction_column=prediction_column)
-    if name == "isotonic":
+    if name in {"isotonic", "isotonic_calibration"}:
         try:
             from sklearn.isotonic import IsotonicRegression
         except Exception:  # pragma: no cover
@@ -668,6 +866,242 @@ def _tune_lgbm(frame: pd.DataFrame, *, actual_column: str, baseline_column: str,
     }
 
 
+def _fit_optional_catboost(frame: pd.DataFrame, *, actual_column: str, baseline_column: str, feature_columns: list[str]) -> dict[str, Any]:
+    if CatBoostRegressor is None:
+        return {
+            "summary": {"status": "skipped", "reason": "catboost is not installed"},
+            "model": None,
+            "val_prediction_frame": None,
+            "test_prediction_frame": None,
+        }
+    train = frame.loc[frame["split"].eq("train")].copy()
+    val = frame.loc[frame["split"].eq("val")].copy()
+    test = frame.loc[frame["split"].eq("test")].copy()
+    cat_columns = [column for column in ["station_id", "region", "region_class", "horizon_step"] if column in feature_columns]
+    cat_indices = [feature_columns.index(column) for column in cat_columns]
+    model = CatBoostRegressor(
+        loss_function="RMSE",
+        iterations=700,
+        depth=8,
+        learning_rate=0.03,
+        l2_leaf_reg=5.0,
+        random_seed=20260528,
+        verbose=False,
+        allow_writing_files=False,
+    )
+    train_x = train[feature_columns].copy()
+    val_x = val[feature_columns].copy()
+    test_x = test[feature_columns].copy()
+    for column in cat_columns:
+        train_x[column] = train_x[column].astype(str)
+        val_x[column] = val_x[column].astype(str)
+        test_x[column] = test_x[column].astype(str)
+    y_train = train[actual_column].astype(float) - train[baseline_column].astype(float)
+    model.fit(train_x, y_train, cat_features=cat_indices)
+    val_prediction = val[baseline_column].astype(float).to_numpy() + model.predict(val_x)
+    test_prediction = test[baseline_column].astype(float).to_numpy() + model.predict(test_x)
+    val_frame = val[["station_id", "issue_time", "valid_time", "horizon_step", actual_column, baseline_column, *[c for c in ["region", "region_class"] if c in val.columns]]].copy()
+    test_frame = test[["station_id", "issue_time", "valid_time", "horizon_step", actual_column, baseline_column, *[c for c in ["region", "region_class"] if c in test.columns]]].copy()
+    val_frame["prediction"] = val_prediction
+    test_frame["prediction"] = test_prediction
+    summary = {
+        "status": "trained",
+        "validation": metric_dict(val_frame[actual_column], val_frame["prediction"]),
+        "test": metric_dict(test_frame[actual_column], test_frame["prediction"]),
+        "categorical_features": cat_columns,
+    }
+    return {"summary": summary, "model": model, "val_prediction_frame": val_frame, "test_prediction_frame": test_frame}
+
+
+def build_ensemble_results(
+    components: dict[str, dict[str, pd.DataFrame]],
+    *,
+    actual_column: str,
+    output_dir: str | Path,
+    target_name: str,
+) -> dict[str, Any]:
+    if len(components) < 2:
+        return {"summary": {"status": "skipped", "reason": "fewer than two components"}, "best_test_prediction": None}
+    val_matrix, val_actual, val_meta = _component_matrix(components, split="val", actual_column=actual_column)
+    test_matrix, test_actual, test_meta = _component_matrix(components, split="test", actual_column=actual_column)
+    if val_matrix.empty or test_matrix.empty:
+        return {"summary": {"status": "skipped", "reason": "components do not align"}, "best_test_prediction": None}
+    methods = {
+        "simple_average": _simple_average_weights(list(val_matrix.columns)),
+        "inverse_rmse_weight": _inverse_rmse_weights(val_matrix, val_actual),
+    }
+    constrained = _constrained_least_squares_weights(val_matrix, val_actual)
+    if constrained is not None:
+        methods["constrained_least_squares"] = constrained
+    rows: list[dict[str, Any]] = []
+    predictions_by_method: dict[str, np.ndarray] = {}
+    weight_payload: dict[str, Any] = {}
+    for method, weights in methods.items():
+        val_prediction = _weighted_prediction(val_matrix, weights)
+        test_prediction = _weighted_prediction(test_matrix, weights)
+        val_metrics = metric_dict(val_actual, val_prediction)
+        test_metrics = metric_dict(test_actual, test_prediction)
+        rows.append({"method": method, "validation_rmse": val_metrics["rmse"], **{f"test_{k}": v for k, v in test_metrics.items()}})
+        predictions_by_method[method] = test_prediction
+        weight_payload[method] = weights
+    for group_method, group_column in [("horizonwise_inverse_rmse", "horizon_step"), ("stationwise_inverse_rmse", "station_id")]:
+        val_prediction, test_prediction, weights = _groupwise_inverse_rmse_ensemble(
+            val_matrix,
+            val_actual,
+            val_meta,
+            test_matrix,
+            test_meta,
+            group_column=group_column,
+        )
+        val_metrics = metric_dict(val_actual, val_prediction)
+        test_metrics = metric_dict(test_actual, test_prediction)
+        rows.append({"method": group_method, "validation_rmse": val_metrics["rmse"], **{f"test_{k}": v for k, v in test_metrics.items()}})
+        predictions_by_method[group_method] = test_prediction
+        weight_payload[group_method] = weights
+    best = min(rows, key=lambda row: float(row["validation_rmse"]))
+    best_method = str(best["method"])
+    output = Path(output_dir)
+    pd.DataFrame(rows).to_csv(output / f"{target_name}_ensemble_component_metrics.csv", index=False)
+    (output / f"{target_name}_ensemble_weights.json").write_text(json.dumps(weight_payload, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+    prediction_frame = test_meta.copy()
+    prediction_frame[actual_column] = test_actual.to_numpy(dtype=float)
+    for method, prediction in predictions_by_method.items():
+        prediction_frame[f"{method}_prediction"] = prediction
+    prediction_frame.to_csv(output / f"{target_name}_ensemble_predictions_test.csv", index=False)
+    _write_ensemble_scatter(test_actual, predictions_by_method[best_method], target_name=target_name, output_dir=output)
+    summary = {
+        "status": "trained",
+        "best": {
+            "method": best_method,
+            "validation_rmse": best["validation_rmse"],
+            "rmse": best["test_rmse"],
+            "mae": best["test_mae"],
+            "bias": best["test_bias"],
+            "n": best["test_n"],
+        },
+        "methods": rows,
+        "artifacts": {
+            "weights": str(output / f"{target_name}_ensemble_weights.json"),
+            "metrics": str(output / f"{target_name}_ensemble_component_metrics.csv"),
+            "predictions": str(output / f"{target_name}_ensemble_predictions_test.csv"),
+            "scatter": str(output / f"{target_name}_baseline_vs_final_scatter.png"),
+        },
+    }
+    return {"summary": summary, "best_test_prediction": predictions_by_method[best_method]}
+
+
+def _component_matrix(
+    components: dict[str, dict[str, pd.DataFrame]],
+    *,
+    split: str,
+    actual_column: str,
+) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+    frames = {name: payload[split].copy() for name, payload in components.items() if payload.get(split) is not None}
+    common_index: set[Any] | None = None
+    for frame in frames.values():
+        common_index = set(frame.index) if common_index is None else common_index.intersection(frame.index)
+    if not common_index:
+        return pd.DataFrame(), pd.Series(dtype=float), pd.DataFrame()
+    ordered = sorted(common_index)
+    first = next(iter(frames.values())).loc[ordered]
+    matrix = pd.DataFrame({name: frame.loc[ordered, "prediction"].to_numpy(dtype=float) for name, frame in frames.items()}, index=ordered)
+    actual = first[actual_column].astype(float)
+    meta_columns = [column for column in ["station_id", "issue_time", "valid_time", "horizon_step", "region", "region_class"] if column in first.columns]
+    return matrix, actual, first[meta_columns].copy()
+
+
+def _simple_average_weights(component_names: list[str]) -> dict[str, float]:
+    if not component_names:
+        return {}
+    weight = 1.0 / len(component_names)
+    return {name: weight for name in component_names}
+
+
+def _inverse_rmse_weights(matrix: pd.DataFrame, actual: pd.Series) -> dict[str, float]:
+    raw = {}
+    for column in matrix.columns:
+        rmse = float(metric_dict(actual, matrix[column])["rmse"])
+        raw[column] = 1.0 / max(rmse, 1e-6)
+    total = sum(raw.values())
+    return {name: float(value / total) for name, value in raw.items()} if total else _simple_average_weights(list(matrix.columns))
+
+
+def _constrained_least_squares_weights(matrix: pd.DataFrame, actual: pd.Series) -> dict[str, float] | None:
+    try:
+        from scipy.optimize import minimize
+    except Exception:  # pragma: no cover - scipy optional in minimal envs.
+        return None
+    columns = list(matrix.columns)
+    x = matrix.to_numpy(dtype=float)
+    y = actual.to_numpy(dtype=float)
+    initial = np.full(len(columns), 1.0 / len(columns), dtype=float)
+
+    def objective(weights: np.ndarray) -> float:
+        return float(np.mean(np.square(x @ weights - y)))
+
+    result = minimize(
+        objective,
+        initial,
+        bounds=[(0.0, 1.0)] * len(columns),
+        constraints=[{"type": "eq", "fun": lambda weights: float(np.sum(weights) - 1.0)}],
+        method="SLSQP",
+    )
+    if not result.success:
+        return None
+    weights = np.asarray(result.x, dtype=float)
+    weights = weights / weights.sum() if weights.sum() else initial
+    return {name: float(weight) for name, weight in zip(columns, weights, strict=True)}
+
+
+def _weighted_prediction(matrix: pd.DataFrame, weights: dict[str, float]) -> np.ndarray:
+    prediction = np.zeros(len(matrix), dtype=float)
+    for column, weight in weights.items():
+        if column in matrix.columns:
+            prediction += float(weight) * matrix[column].to_numpy(dtype=float)
+    return prediction
+
+
+def _groupwise_inverse_rmse_ensemble(
+    val_matrix: pd.DataFrame,
+    val_actual: pd.Series,
+    val_meta: pd.DataFrame,
+    test_matrix: pd.DataFrame,
+    test_meta: pd.DataFrame,
+    *,
+    group_column: str,
+) -> tuple[np.ndarray, np.ndarray, dict[str, dict[str, float]]]:
+    global_weights = _inverse_rmse_weights(val_matrix, val_actual)
+    weights_by_group: dict[str, dict[str, float]] = {}
+    val_prediction = np.zeros(len(val_matrix), dtype=float)
+    test_prediction = np.zeros(len(test_matrix), dtype=float)
+    for group, index in val_meta.groupby(group_column).groups.items():
+        weights = _inverse_rmse_weights(val_matrix.loc[index], val_actual.loc[index]) if len(index) >= 2 else global_weights
+        weights_by_group[str(group)] = weights
+        val_prediction[val_matrix.index.get_indexer(index)] = _weighted_prediction(val_matrix.loc[index], weights)
+    for group, index in test_meta.groupby(group_column).groups.items():
+        weights = weights_by_group.get(str(group), global_weights)
+        test_prediction[test_matrix.index.get_indexer(index)] = _weighted_prediction(test_matrix.loc[index], weights)
+    return val_prediction, test_prediction, weights_by_group
+
+
+def _write_ensemble_scatter(actual: pd.Series, prediction: np.ndarray, *, target_name: str, output_dir: Path) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:  # pragma: no cover
+        return
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.scatter(actual, prediction, s=8, alpha=0.35)
+    lo = float(min(np.nanmin(actual), np.nanmin(prediction)))
+    hi = float(max(np.nanmax(actual), np.nanmax(prediction)))
+    ax.plot([lo, hi], [lo, hi], color="black", linewidth=1)
+    ax.set_xlabel("actual")
+    ax.set_ylabel("ensemble prediction")
+    ax.set_title(f"{target_name} ensemble prediction")
+    fig.tight_layout()
+    fig.savefig(output_dir / f"{target_name}_baseline_vs_final_scatter.png", dpi=140)
+    plt.close(fig)
+
+
 def _fit_ridge_debug(frame: pd.DataFrame, *, actual_column: str, baseline_column: str, target_name: str, output_dir: Path) -> dict[str, Any]:
     feature_cols = [column for column in BASE_FEATURES if column in frame.columns]
     train = frame.loc[frame["split"].eq("train")].copy()
@@ -723,37 +1157,23 @@ def _station_neighbor_features(frame: pd.DataFrame, patch_size: int) -> list[str
         distances = np.square(stations["lat"].astype(float) - float(row.lat)) + np.square(stations["lon"].astype(float) - float(row.lon))
         neighbor_ids[str(row.station_id)] = stations.loc[distances.nsmallest(k).index, "station_id"].astype(str).tolist()
     key_cols = ["issue_time", "horizon_step"]
-    lookup = frame.set_index(["station_id", *key_cols])[variables]
-    feature_names = []
-    rows: list[dict[str, Any]] = []
-    for sample in frame[["station_id", *key_cols]].itertuples(index=False):
-        values_by_var: dict[str, list[float]] = {var: [] for var in variables}
-        for sid in neighbor_ids.get(str(sample.station_id), [str(sample.station_id)]):
-            try:
-                values = lookup.loc[(sid, sample.issue_time, sample.horizon_step)]
-            except KeyError:
-                continue
-            for var in variables:
-                value = values[var]
-                if pd.notna(value):
-                    values_by_var[var].append(float(value))
-        out: dict[str, float] = {}
-        for var, values in values_by_var.items():
-            arr = np.asarray(values, dtype=float)
-            for suffix, val in {
-                "mean": float(np.nanmean(arr)) if arr.size else np.nan,
-                "std": float(np.nanstd(arr)) if arr.size else np.nan,
-                "min": float(np.nanmin(arr)) if arr.size else np.nan,
-                "max": float(np.nanmax(arr)) if arr.size else np.nan,
-            }.items():
-                name = f"{var}_station_patch{patch_size}_{suffix}"
-                out[name] = val
-                if name not in feature_names:
-                    feature_names.append(name)
-        rows.append(out)
-    features = pd.DataFrame(rows, index=frame.index)
-    for column in features.columns:
-        frame[column] = features[column]
+    feature_names = [f"{var}_station_patch{patch_size}_{suffix}" for var in variables for suffix in ("mean", "std", "min", "max")]
+    features = pd.DataFrame(index=frame.index, columns=feature_names, dtype=float)
+    work = frame[["station_id", *key_cols, *variables]].copy()
+    work["station_id"] = work["station_id"].astype(str)
+    for station_id, neighbors in neighbor_ids.items():
+        source = work.loc[work["station_id"].isin(neighbors), [*key_cols, *variables]]
+        if source.empty:
+            continue
+        aggregated = source.groupby(key_cols, dropna=False)[variables].agg(["mean", "std", "min", "max"])
+        aggregated.columns = [f"{var}_station_patch{patch_size}_{suffix}" for var, suffix in aggregated.columns]
+        aggregated = aggregated.reset_index()
+        target_index = frame.index[frame["station_id"].astype(str).eq(station_id)]
+        target = frame.loc[target_index, key_cols].copy()
+        target["__index"] = target_index
+        merged = target.merge(aggregated, on=key_cols, how="left").set_index("__index")
+        features.loc[target_index, feature_names] = merged[feature_names].to_numpy(dtype=float)
+    frame[feature_names] = features
     return feature_names
 
 
@@ -858,7 +1278,7 @@ def _write_ridge_debug_plots(frame: pd.DataFrame, *, target_name: str, actual_co
 
 
 def _write_markdown_report(summary: dict[str, Any], path: Path) -> None:
-    lines = ["# G024 Operational Performance Report", "", f"benchmark_reliability: `{summary.get('benchmark_reliability')}`", "", "## Official Baselines", ""]
+    lines = ["# Operational Performance Report", "", f"benchmark_reliability: `{summary.get('benchmark_reliability')}`", "", "## Official Baselines", ""]
     for target, models in summary.get("official_baselines", {}).items():
         lines.append(f"### {target}")
         for model, metrics in models.items():
@@ -921,11 +1341,12 @@ def _json_default(value: Any) -> Any:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run G024 operational-valid MOS performance sprint and always write an HTML report.")
+    parser = argparse.ArgumentParser(description="Run operational-valid MOS performance benchmarks and always write an HTML report.")
     parser.add_argument("--nwp-archive", required=True)
     parser.add_argument("--archive-quality-report", required=True)
     parser.add_argument("--observations", required=True)
     parser.add_argument("--station-metadata", required=True)
+    parser.add_argument("--grid-patch-features", help="Optional true GFS grid patch feature CSV from weather_korea_forecast.v4.gfs_grid_patch.")
     parser.add_argument("--output-dir", default="data/artifacts/g024_operational_performance")
     return parser
 
@@ -938,6 +1359,7 @@ def main(argv: list[str] | None = None) -> None:
         observations=args.observations,
         station_metadata=args.station_metadata,
         output_dir=args.output_dir,
+        grid_patch_features=args.grid_patch_features,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
 
