@@ -219,7 +219,22 @@ def collect_experiment(exp_dir: Path) -> ExperimentRecord:
         forecast_archive_adequate=forecast_archive_adequate,
         forecast_archive_row_count=_int(summary.get("forecast_archive_row_count") or forecast_archive.get("row_count") or forecast_archive.get("rows")),
         forecast_archive_station_count=_int(summary.get("forecast_archive_station_count") or forecast_archive.get("station_count") or forecast_archive.get("stations")),
-        forecast_archive_issue_time_count=_int(summary.get("forecast_archive_issue_time_count") or forecast_archive.get("issue_time_count") or forecast_archive.get("issue_cycles")),
+        forecast_archive_issue_time_count=_int(
+            summary.get("forecast_archive_issue_time_count")
+            or forecast_archive.get("issue_time_count")
+            or forecast_archive.get("forecast_cycle_count")
+            or forecast_archive.get("issue_cycles")
+        ),
+        forecast_archive_horizon_coverage=_float(
+            summary.get("forecast_archive_horizon_coverage") or forecast_archive.get("horizon_1_24_coverage")
+        ),
+        forecast_archive_missing_rate=_float(summary.get("forecast_archive_missing_rate") or forecast_archive.get("missing_rate")),
+        forecast_archive_blocking_reasons=_list_of_strings(
+            summary.get("forecast_archive_blocking_reasons")
+            or forecast_archive.get("blocking_reasons")
+            or forecast_archive.get("adequacy_reasons")
+            or []
+        ),
         forecast_source_path=forecast_source_path,
         patch_features_enabled=_bool(
             summary.get("uses_patch_features", summary.get("patch_features_enabled", patch_features.get("enabled")))
@@ -795,6 +810,17 @@ def _int(value: Any) -> int | None:
         return int(float(value))
     except Exception:
         return None
+
+def _list_of_strings(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, tuple):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return [str(value)]
 
 def _bool(value: Any) -> bool | None:
     if value is None or value is pd.NA:

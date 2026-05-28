@@ -5,6 +5,8 @@ __pycache__/
 *.pyd
 .Python
 .pytest_cache/
+.pytest_tmp*/
+pytest-cache-files-*/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -39,6 +41,7 @@ dist/
 tmp/
 temp/
 tmp_smoke*/
+docs/superpowers/
 
 # Model and experiment artifacts
 *.ckpt

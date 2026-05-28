@@ -277,6 +277,42 @@ python -m weather_korea_forecast.v2.predict ^
   --output-csv data/artifacts/v2_experiments/latest/forecast_operational.csv
 ```
 
+
+### G023 real NWP forecast archive workflow
+
+Operational-valid G022 training requires a real prepared forecast archive, not ERA5 reanalysis, smoke, synthetic, generated, or fixture rows. Build source-specific prepared files first, then merge and gate them:
+
+```bash
+python -m weather_korea_forecast.data.kma_forecast_archive \
+  --input data/raw/nwp/kma_forecast_raw.csv \
+  --station-metadata data/raw/metadata/stations.csv \
+  --output data/raw/nwp/archive/kma_prepared_forecast.csv
+
+python -m weather_korea_forecast.data.gfs_forecast_archive \
+  --input data/raw/nwp/gfs_forecast_raw.csv \
+  --station-metadata data/raw/metadata/stations.csv \
+  --output data/raw/nwp/archive/gfs_prepared_forecast.csv
+
+python -m weather_korea_forecast.data.nwp_archive \
+  --inputs data/raw/nwp/archive/kma_prepared_forecast.csv data/raw/nwp/archive/gfs_prepared_forecast.csv \
+  --output data/raw/nwp/archive/prepared_forecast_archive.csv \
+  --quality-report data/raw/nwp/archive/archive_quality_report.json \
+  --expected-columns nwp_t2m,nwp_sp,nwp_u10,nwp_v10,nwp_tp,nwp_dew_point
+```
+
+Adequacy defaults are `station_count >= 20`, `forecast_cycle_count >= 30`, horizon 1–24 coverage `>= 0.95`, missing rate `<= 0.05`, train/val/test split possible, and no synthetic/smoke/generated/fixture provenance. The quality report also checks humidity/dew-point units/ranges, precipitation probability, sky code, precipitation type, per-station cycle/horizon coverage, and configured expected forecast columns. It writes `archive_content_sha256`; G022 training rejects stale or mismatched quality reports.
+
+Run operational G022 training only through the gated command:
+
+```bash
+python -m weather_korea_forecast.v2.train \
+  --config configs/g022/experiments/g022_temp_operational_residual_ridge_72to24.yaml \
+  --future-weather-csv data/raw/nwp/archive/prepared_forecast_archive.csv \
+  --archive-quality-report data/raw/nwp/archive/archive_quality_report.json
+```
+
+If `forecast_archive_adequate=false`, training is blocked and the quality report's `blocking_reasons` explain which data-collection target is still short. See `docs/NWP_ARCHIVE_ACQUISITION.md`, `docs/KMA_FORECAST_ADAPTER.md`, `docs/GFS_FORECAST_ADAPTER.md`, and `docs/FORECAST_ARCHIVE_QUALITY_GATE.md`.
+
 `data.future_features.column_mapping`은 forecast CSV 컬럼을 학습 feature 이름으로 매핑한다. 예: `era5_t2m: gfs_t2m`, `era5_sp: gfs_sp`, `era5_u10: gfs_u10`, `era5_v10: gfs_v10`, `era5_tp: gfs_tp`. `issue_time`이 있으면 `forecast_init_time` 이하의 최신 run을 선택한다. 운영 추론에서는 미래 weather covariate가 모든 horizon에 없으면 실행을 중단한다.
 
 ### V2 기본 실험 config

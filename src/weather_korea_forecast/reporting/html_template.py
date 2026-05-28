@@ -67,6 +67,7 @@ def render_report(
   {_readiness_section(records, main_records)}
   {_v4_validation_section(records, main_records)}
   {_g022_performance_section(records, main_records)}
+  {_nwp_archive_status_section(records, main_records)}
   {_v4_c_gate_section(main_records)}
   <section class=\"card\">
     <h2>리더보드</h2>
@@ -107,6 +108,11 @@ def render_report(
 </body>
 </html>
 """
+
+
+def render_html_report(records: list[ExperimentRecord], *, title: str) -> str:
+    """Compatibility wrapper for focused tests and lightweight callers."""
+    return render_report(records, title=title, experiments_root=Path("."), include_images=False)
 
 
 def _json_for_inline_script(value: object) -> str:
@@ -504,6 +510,67 @@ def _g022_performance_section(all_records: list[ExperimentRecord], main_records:
     return f"""<section class="card g022-performance">
       <h2>G022 Model Performance Sprint</h2>
       <p class="muted">기능 추가보다 성능 개선을 추적합니다. real NWP archive가 부족하면 operational RMSE를 계산하지 않고 gate를 WARN/FAIL로 유지합니다.</p>
+      <dl>{_dl(metrics)}</dl>
+    </section>"""
+
+
+def _nwp_archive_status_section(all_records: list[ExperimentRecord], main_records: list[ExperimentRecord]) -> str:
+    candidates = [
+        r
+        for r in main_records
+        if r.future_feature_source == "prepared_forecast_csv"
+        or r.forecast_archive_adequate is not None
+        or r.forecast_source_path
+    ]
+    if not candidates:
+        candidates = [
+            r
+            for r in all_records
+            if r.future_feature_source == "prepared_forecast_csv"
+            or r.forecast_archive_adequate is not None
+            or r.forecast_source_path
+        ]
+    best = max(
+        candidates,
+        key=lambda r: (
+            r.forecast_archive_adequate is True,
+            r.forecast_archive_station_count or 0,
+            r.forecast_archive_issue_time_count or 0,
+            r.forecast_archive_horizon_coverage or 0.0,
+        ),
+        default=None,
+    )
+    if best is None:
+        metrics = {
+            "archive source": "n/a",
+            "station_count": None,
+            "forecast_cycle_count": None,
+            "horizon coverage": None,
+            "archive adequate": False,
+            "blocking reasons": "no prepared forecast archive metadata found",
+            "latest archive path": "n/a",
+            "operational training enabled": False,
+        }
+    else:
+        operational_training_enabled = (
+            best.forecast_archive_adequate is True
+            and bool(best.forecast_source_path)
+            and best.forecast_source_schema_valid is True
+        )
+        metrics = {
+            "archive source": best.future_feature_source,
+            "station_count": best.forecast_archive_station_count,
+            "forecast_cycle_count": best.forecast_archive_issue_time_count,
+            "horizon coverage": best.forecast_archive_horizon_coverage,
+            "missing rate": best.forecast_archive_missing_rate,
+            "archive adequate": best.forecast_archive_adequate,
+            "blocking reasons": ", ".join(best.forecast_archive_blocking_reasons) if best.forecast_archive_blocking_reasons else "none",
+            "latest archive path": best.forecast_source_path or "n/a",
+            "operational training enabled": operational_training_enabled,
+        }
+    return f"""<section class="card nwp-archive-status">
+      <h2>NWP Archive Status</h2>
+      <p class="muted">real prepared forecast archive coverage and operational training gate status.</p>
       <dl>{_dl(metrics)}</dl>
     </section>"""
 

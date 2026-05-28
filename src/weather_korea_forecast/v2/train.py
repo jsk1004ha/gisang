@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +34,7 @@ from weather_korea_forecast.v2.target_transforms import (
 
 
 def train_v2_experiment(config: dict) -> Path:
+    _enforce_operational_archive_gate(config)
     if "ensemble" in config and ("data" not in config or "model" not in config):
         from weather_korea_forecast.v2.ensemble import build_prediction_ensemble_from_config
 
@@ -116,6 +120,194 @@ def train_v2_experiment(config: dict) -> Path:
     refresh_aliases(experiment_dir)
     print(experiment_dir)
     return experiment_dir
+
+
+def apply_forecast_archive_overrides(
+    config: dict,
+    *,
+    future_weather_csv: str | Path | None = None,
+    archive_quality_report: str | Path | None = None,
+) -> dict:
+    """Apply CLI forecast archive overrides and enforce the operational gate.
+
+    G022 operational prepared-forecast configs must be backed by a real archive
+    quality report with ``forecast_archive_adequate=true``. This helper mutates
+    a copy of the config so tests and callers can validate the gate without
+    starting a training run.
+    """
+
+    updated = copy.deepcopy(config)
+    paths = updated.setdefault("paths", {})
+    data = updated.setdefault("data", {})
+    future = data.setdefault("future_features", {})
+    if future_weather_csv is not None:
+        csv_path = str(future_weather_csv)
+        paths["prepared_forecast_archive"] = csv_path
+        paths["future_weather_csv"] = csv_path
+        future["forecast_source_path"] = csv_path
+    report_payload: dict[str, object] = {}
+    if archive_quality_report is not None:
+        report_path = Path(archive_quality_report)
+        with report_path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Archive quality report must be a JSON object: {report_path}")
+        report_payload = loaded
+        adequate = _strict_report_true(loaded.get("forecast_archive_adequate"))
+        effective_archive_path = _effective_forecast_archive_path(updated)
+        if adequate:
+            if effective_archive_path is None:
+                raise ValueError("G022 operational prepared forecast training requires --future-weather-csv or paths.prepared_forecast_archive.")
+            _verify_archive_report_matches_csv(effective_archive_path, loaded)
+            _validate_report_feature_contract(loaded, updated)
+        archive = dict(future.get("archive") or {})
+        archive.update(
+            {
+                "adequate": adequate,
+                "row_count": loaded.get("row_count"),
+                "station_count": loaded.get("station_count"),
+                "issue_time_count": loaded.get("issue_time_count", loaded.get("forecast_cycle_count")),
+                "forecast_cycle_count": loaded.get("forecast_cycle_count"),
+                "horizon_1_24_coverage": loaded.get("horizon_1_24_coverage"),
+                "blocking_reasons": loaded.get("blocking_reasons", loaded.get("adequacy_reasons", [])),
+                "quality_report_path": str(report_path),
+            }
+        )
+        future["archive"] = archive
+        future["forecast_archive_adequate"] = adequate
+        updated["forecast_archive"] = archive
+        updated["forecast_archive_adequate"] = adequate
+    if future_weather_csv is not None and (not report_payload or report_payload.get("forecast_archive_adequate") is True):
+        _validate_configured_forecast_columns(Path(future_weather_csv), updated)
+    _enforce_operational_archive_gate(updated, report_payload=report_payload)
+    return updated
+
+
+def _effective_forecast_archive_path(config: dict) -> Path | None:
+    paths = config.get("paths", {}) if isinstance(config.get("paths"), dict) else {}
+    future = config.get("data", {}).get("future_features", config.get("data", {}).get("future_weather_features", {})) or {}
+    value = (
+        paths.get("future_weather_csv")
+        or paths.get("prepared_forecast_archive")
+        or paths.get("prepared_forecast_csv")
+        or paths.get("nwp_forecast_csv")
+        or future.get("forecast_source_path")
+    )
+    return Path(value) if value else None
+
+
+def _enforce_operational_archive_gate(config: dict, *, report_payload: dict[str, object] | None = None) -> None:
+    data = config.get("data", {})
+    future = data.get("future_features", data.get("future_weather_features", {})) or {}
+    source = str(future.get("source") or data.get("future_feature_source") or "").lower().replace("-", "_")
+    uses_prepared_operational = (
+        source == "prepared_forecast_csv"
+        and bool(future.get("operational_valid", config.get("operational_valid", False)))
+    )
+    name_text = " ".join(
+        str(value or "").lower()
+        for value in (
+            config.get("experiment", {}).get("name") if isinstance(config.get("experiment"), dict) else None,
+            config.get("experiment", {}).get("version") if isinstance(config.get("experiment"), dict) else None,
+            config.get("version"),
+        )
+    )
+    if not uses_prepared_operational and "g022" not in name_text:
+        return
+    adequate = future.get("forecast_archive_adequate", config.get("forecast_archive_adequate"))
+    if adequate is None and isinstance(future.get("archive"), dict):
+        adequate = future["archive"].get("adequate")
+    if adequate is True:
+        if _requires_bound_quality_report(config) and not _report_is_bound(report_payload):
+            raise ValueError("G022 operational prepared forecast training requires a bound archive quality report with archive_content_sha256.")
+        return
+    reasons: object = None
+    if report_payload:
+        reasons = report_payload.get("blocking_reasons") or report_payload.get("adequacy_reasons")
+    if not reasons and isinstance(future.get("archive"), dict):
+        reasons = future["archive"].get("blocking_reasons") or future["archive"].get("adequacy_reasons")
+    reason_text = ", ".join(str(item) for item in reasons) if isinstance(reasons, list) else str(reasons or "forecast_archive_adequate != true")
+    raise ValueError(f"G022 operational prepared forecast training requires forecast_archive_adequate=true; blocking reasons: {reason_text}")
+
+
+def _requires_bound_quality_report(config: dict) -> bool:
+    paths = config.get("paths", {}) if isinstance(config.get("paths"), dict) else {}
+    future = config.get("data", {}).get("future_features", config.get("data", {}).get("future_weather_features", {})) or {}
+    return bool(paths.get("prepared_forecast_archive") or paths.get("future_weather_csv") or future.get("forecast_source_path"))
+
+
+def _report_is_bound(report_payload: dict[str, object] | None) -> bool:
+    return isinstance(report_payload, dict) and report_payload.get("archive_content_sha256") is not None
+
+
+def _strict_report_true(value: object) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, bool):
+        return False
+    raise ValueError("archive_quality_report.forecast_archive_adequate must be strict JSON boolean true/false, and operational training requires true.")
+
+
+def _verify_archive_report_matches_csv(archive_path: Path, report: dict[str, object]) -> None:
+    expected_digest = report.get("archive_content_sha256")
+    if expected_digest is None:
+        raise ValueError("archive_quality_report must include archive_content_sha256 to bind it to --future-weather-csv.")
+    if not archive_path.exists():
+        raise FileNotFoundError(archive_path)
+    actual_digest = _sha256_file(archive_path)
+    if str(expected_digest) != actual_digest:
+        raise ValueError("--archive-quality-report archive_content_sha256 does not match --future-weather-csv.")
+
+
+def _validate_report_feature_contract(report: dict[str, object], config: dict) -> None:
+    configured = set(_configured_forecast_columns(config))
+    if not configured:
+        return
+    expected = set(str(column) for column in report.get("expected_columns") or [])
+    missing_from_report = sorted(configured - expected)
+    if missing_from_report:
+        raise ValueError(f"archive_quality_report expected_columns must include configured forecast columns: {missing_from_report}")
+    raw_rates = report.get("expected_column_missing_rates") or {}
+    rates = raw_rates if isinstance(raw_rates, dict) else {}
+    bad_rates = {
+        column: float(rates.get(column, 1.0))
+        for column in configured
+        if float(rates.get(column, 1.0)) > 0.05
+    }
+    if bad_rates:
+        raise ValueError(f"archive_quality_report expected_column_missing_rates exceed threshold: {bad_rates}")
+
+
+def _validate_configured_forecast_columns(archive_path: Path, config: dict) -> None:
+    if not archive_path.exists():
+        raise FileNotFoundError(archive_path)
+    expected = _configured_forecast_columns(config)
+    if not expected:
+        return
+    header = set(pd.read_csv(archive_path, nrows=0).columns)
+    missing = sorted(column for column in expected if column not in header)
+    if missing:
+        raise ValueError(f"--future-weather-csv is missing configured forecast columns: {missing}")
+
+
+def _configured_forecast_columns(config: dict) -> list[str]:
+    feature_config = config.get("data", {}).get("features", {})
+    future_config = config.get("data", {}).get("future_features", config.get("data", {}).get("future_weather_features", {})) or {}
+    configured = [
+        *[str(column) for column in feature_config.get("decoder_known", [])],
+        *[str(column) for column in feature_config.get("nwp_features", [])],
+        *[str(column) for column in future_config.get("weather_columns", [])],
+    ]
+    prefixes = ("nwp_", "gfs_", "ecmwf_", "kma_", "gdps_", "um_", "era5_")
+    return sorted({column for column in configured if column.startswith(prefixes)})
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_v2_prediction_frame(
@@ -779,13 +971,19 @@ def _season_from_timestamp(timestamp: pd.Timestamp) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a V2 experiment from a unified config.")
     parser.add_argument("--config", required=True)
+    parser.add_argument("--future-weather-csv", help="Override paths.future_weather_csv/prepared_forecast_archive for operational forecast training.")
+    parser.add_argument("--archive-quality-report", help="Archive quality JSON required for G022 operational prepared forecast training.")
     parser.add_argument("--update-report", dest="update_report", action="store_true", default=True, help="Regenerate reports/experiment_report.html after training (default).")
     parser.add_argument("--no-update-report", dest="update_report", action="store_false", help="Skip automatic unified report generation.")
     parser.add_argument("--report-output-dir", default="reports")
     parser.add_argument("--report-title", default="기상 V1-V3 실험 리포트")
     args = parser.parse_args()
 
-    config = load_yaml(args.config)
+    config = apply_forecast_archive_overrides(
+        load_yaml(args.config),
+        future_weather_csv=args.future_weather_csv,
+        archive_quality_report=args.archive_quality_report,
+    )
     experiment_dir = train_v2_experiment(config)
     if args.update_report:
         from weather_korea_forecast.reporting.generate_report import build_report

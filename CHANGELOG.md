@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-05-28
+
+### Added
+- Added G023 real NWP forecast archive acquisition adapters for KMA local forecast CSVs, GFS/NOMADS local/extracted tables, and an ECMWF local-table skeleton.
+- Added richer prepared forecast archive quality reports with station/cycle/horizon coverage tables, per-station adequacy, expected-column missing rates, archive SHA-256 binding, blocking reasons, and humidity/dew-point/weather-code sanity checks.
+- Added a G022 operational training gate that requires strict boolean `forecast_archive_adequate=true`, matching archive SHA-256, and configured forecast feature columns before model fitting.
+- Added NWP Archive Status integration to the HTML report and documentation for KMA/GFS archive build workflows and quality gates.
+
 ## 2026-05-14
 
 ### Added

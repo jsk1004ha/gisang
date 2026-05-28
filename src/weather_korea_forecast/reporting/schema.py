@@ -67,6 +67,9 @@ class ExperimentRecord:
     forecast_archive_row_count: int | None = None
     forecast_archive_station_count: int | None = None
     forecast_archive_issue_time_count: int | None = None
+    forecast_archive_horizon_coverage: float | None = None
+    forecast_archive_missing_rate: float | None = None
+    forecast_archive_blocking_reasons: list[str] = field(default_factory=list)
     forecast_source_path: str | None = None
     patch_features_enabled: bool | None = None
     uses_patch_features: bool | None = None
