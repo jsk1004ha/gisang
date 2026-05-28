@@ -313,6 +313,21 @@ python -m weather_korea_forecast.v2.train \
 
 If `forecast_archive_adequate=false`, training is blocked and the quality report's `blocking_reasons` explain which data-collection target is still short. See `docs/NWP_ARCHIVE_ACQUISITION.md`, `docs/KMA_FORECAST_ADAPTER.md`, `docs/GFS_FORECAST_ADAPTER.md`, and `docs/FORECAST_ARCHIVE_QUALITY_GATE.md`.
 
+### G024 operational performance sprint
+
+After the G023 archive gate passes, run the operational-valid LightGBM MOS sprint against real forecast and real ASOS observations. The runner always writes a visual HTML summary alongside JSON/CSV artifacts:
+
+```bash
+PYTHONPATH=src .venv312/Scripts/python.exe -m weather_korea_forecast.v4.operational_performance \
+  --nwp-archive data/raw/nwp/archive/prepared_forecast_archive.csv \
+  --archive-quality-report data/raw/nwp/archive/archive_quality_report.json \
+  --observations data/raw/asos/asos_hourly.csv \
+  --station-metadata data/raw/metadata/stations.csv \
+  --output-dir data/artifacts/g024_operational_performance
+```
+
+Official operational baselines are `raw_gfs_t2m` and `operational_residual_lgbm_temp` for temperature, plus `raw_gfs_rh` and `operational_residual_lgbm_humidity` for humidity. Ridge residual models are reported under debug until they beat raw GFS on operational data. The report includes calibration selection, LGBM grid results, patch ablation, ridge residual sign/formula diagnostics, V4-C gate status, site-readiness status, and benchmark reliability (`smoke`/`short`/`medium`/`strong`/`seasonal`). See `docs/G024_OPERATIONAL_PERFORMANCE.md`.
+
 `data.future_features.column_mapping`은 forecast CSV 컬럼을 학습 feature 이름으로 매핑한다. 예: `era5_t2m: gfs_t2m`, `era5_sp: gfs_sp`, `era5_u10: gfs_u10`, `era5_v10: gfs_v10`, `era5_tp: gfs_tp`. `issue_time`이 있으면 `forecast_init_time` 이하의 최신 run을 선택한다. 운영 추론에서는 미래 weather covariate가 모든 horizon에 없으면 실행을 중단한다.
 
 ### V2 기본 실험 config

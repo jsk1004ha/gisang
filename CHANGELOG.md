@@ -3,6 +3,7 @@
 ## 2026-05-28
 
 ### Added
+- Added the G024 operational performance runner for real forecast NWP + real ASOS benchmarks, with official raw-GFS and residual-LightGBM baselines, calibration selection, station-neighborhood patch ablation, LightGBM grid artifacts, ridge residual diagnostics, V4-C/site-readiness gate summaries, benchmark reliability labels, and always-generated HTML reports.
 - Added G023 real NWP forecast archive acquisition adapters for KMA local forecast CSVs, GFS/NOMADS local/extracted tables, and an ECMWF local-table skeleton.
 - Added richer prepared forecast archive quality reports with station/cycle/horizon coverage tables, per-station adequacy, expected-column missing rates, archive SHA-256 binding, blocking reasons, and humidity/dew-point/weather-code sanity checks.
 - Added a G022 operational training gate that requires strict boolean `forecast_archive_adequate=true`, matching archive SHA-256, and configured forecast feature columns before model fitting.
