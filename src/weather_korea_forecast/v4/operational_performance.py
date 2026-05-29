@@ -42,7 +42,22 @@ BASE_FEATURES = [
     "nwp_u10",
     "nwp_v10",
     "nwp_tp",
+    "nwp_gust",
+    "nwp_cloud_cover",
+    "nwp_low_cloud_cover",
+    "nwp_shortwave_radiation",
+    "nwp_longwave_radiation",
+    "nwp_soil_temperature",
+    "nwp_land_sea_mask",
+    "nwp_specific_humidity",
+    "nwp_pwat",
+    "nwp_precip_rate",
+    "nwp_mslp",
     "nwp_wind_speed",
+    "nwp_wind_direction",
+    "nwp_dewpoint_depression",
+    "nwp_humidity_logit",
+    "nwp_temp_pressure_interaction",
     "lat",
     "lon",
     "elevation",
@@ -56,6 +71,36 @@ BASE_FEATURES = [
     "valid_doy_sin",
     "valid_doy_cos",
 ]
+FULL_VARIABLE_COLUMNS = [
+    "nwp_t2m",
+    "nwp_dew_point",
+    "nwp_humidity",
+    "nwp_sp",
+    "nwp_u10",
+    "nwp_v10",
+    "nwp_tp",
+    "nwp_gust",
+    "nwp_cloud_cover",
+    "nwp_low_cloud_cover",
+    "nwp_shortwave_radiation",
+    "nwp_longwave_radiation",
+    "nwp_soil_temperature",
+    "nwp_land_sea_mask",
+    "nwp_specific_humidity",
+    "nwp_pwat",
+    "nwp_precip_rate",
+    "nwp_mslp",
+]
+HUMIDITY_PATCH_VARIABLE_HINTS = (
+    "humidity",
+    "dew_point",
+    "specific_humidity",
+    "pwat",
+    "cloud",
+    "precip",
+    "tp",
+    "t2m",
+)
 DEFAULT_LGBM_GRID = [
     {"num_leaves": 15, "max_depth": 4, "learning_rate": 0.05, "n_estimators": 350, "min_child_samples": 20, "subsample": 0.9, "colsample_bytree": 0.9, "reg_alpha": 0.0, "reg_lambda": 0.0, "min_split_gain": 0.0},
     {"num_leaves": 31, "max_depth": -1, "learning_rate": 0.03, "n_estimators": 500, "min_child_samples": 20, "subsample": 0.9, "colsample_bytree": 0.9, "reg_alpha": 0.0, "reg_lambda": 0.0, "min_split_gain": 0.0},
@@ -252,6 +297,59 @@ def classify_benchmark_reliability(*, forecast_cycle_count: int, date_span_days:
     return "smoke"
 
 
+def summarize_variable_coverage(frame: pd.DataFrame, variables: Iterable[str] = FULL_VARIABLE_COLUMNS, *, split_column: str = "split") -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    total = int(len(frame))
+    split_values = []
+    if split_column in frame.columns:
+        split_values = sorted(str(value) for value in frame[split_column].dropna().unique())
+    for column in variables:
+        if column not in frame.columns:
+            row = {
+                "variable": column,
+                "present": False,
+                "non_null_count": 0,
+                "missing_count": total,
+                "coverage": 0.0,
+                "min": None,
+                "max": None,
+                "split_coverage": {},
+            }
+            for split in split_values:
+                row[f"{split}_coverage"] = 0.0
+            rows.append(row)
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        non_null = int(values.notna().sum())
+        split_coverage: dict[str, float] = {}
+        for split in split_values:
+            mask = frame[split_column].astype(str) == split
+            denominator = int(mask.sum())
+            split_coverage[split] = float(values[mask].notna().sum() / denominator) if denominator else 0.0
+        rows.append(
+            {
+                "variable": column,
+                "present": True,
+                "non_null_count": non_null,
+                "missing_count": int(total - non_null),
+                "coverage": float(non_null / total) if total else 0.0,
+                "min": float(values.min()) if non_null else None,
+                "max": float(values.max()) if non_null else None,
+                "split_coverage": split_coverage,
+                **{f"{split}_coverage": split_coverage[split] for split in split_values},
+            }
+        )
+    available = [row["variable"] for row in rows if bool(row["present"]) and float(row["coverage"]) > 0.0]
+    missing = [row["variable"] for row in rows if not bool(row["present"]) or float(row["coverage"]) == 0.0]
+    return {
+        "row_count": total,
+        "available_variables": available,
+        "missing_variables": missing,
+        "full_variable_count": len(available),
+        "variables": rows,
+    }
+
+
 def fit_calibration_candidates(
     calibration_frame: pd.DataFrame,
     holdout_frame: pd.DataFrame,
@@ -359,6 +457,67 @@ def evaluate_site_readiness_gate(summary: dict[str, Any]) -> dict[str, Any]:
     return {"status": "PASS" if not missing else "WARN", "conditions": conditions, "missing_conditions": missing}
 
 
+def build_production_model_manifest(summary: dict[str, Any]) -> dict[str, Any]:
+    best = summary.get("best_operational_models", {}) if isinstance(summary.get("best_operational_models"), dict) else {}
+    temp = best.get("temp", {}) if isinstance(best.get("temp"), dict) else {}
+    humidity = best.get("humidity", {}) if isinstance(best.get("humidity"), dict) else {}
+    site = summary.get("site_readiness", {}) if isinstance(summary.get("site_readiness"), dict) else evaluate_site_readiness_gate(summary)
+    v4c = summary.get("v4c_gate", {}) if isinstance(summary.get("v4c_gate"), dict) else evaluate_v4c_gate(summary)
+    temp_artifact = _target_model_artifact_summary("temp", temp, summary)
+    humidity_artifact = _target_model_artifact_summary("humidity", humidity, summary)
+    return {
+        "temp_model_artifact": temp_artifact["primary_artifact"],
+        "humidity_model_artifact": humidity_artifact["primary_artifact"],
+        "temp_model": temp.get("model"),
+        "humidity_model": humidity.get("model"),
+        "temp_artifact_type": temp_artifact["artifact_type"],
+        "humidity_artifact_type": humidity_artifact["artifact_type"],
+        "temp_selected_model_key": temp_artifact["selected_model_key"],
+        "humidity_selected_model_key": humidity_artifact["selected_model_key"],
+        "temp_artifacts": temp_artifact,
+        "humidity_artifacts": humidity_artifact,
+        "temp_rmse": temp.get("rmse"),
+        "humidity_rmse": humidity.get("rmse"),
+        "temp_mae": temp.get("mae"),
+        "humidity_mae": humidity.get("mae"),
+        "temp_bias": temp.get("bias"),
+        "humidity_bias": humidity.get("bias"),
+        "benchmark_reliability": summary.get("benchmark_reliability"),
+        "site_readiness_status": site.get("status"),
+        "v4c_gate_status": v4c.get("status"),
+        "operational_beta_allowed": site.get("status") == "PASS",
+        "target_specific_models": True,
+    }
+
+
+def _target_model_artifact_summary(target: str, metrics: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+    artifacts = summary.get("artifacts", {}) if isinstance(summary.get("artifacts"), dict) else {}
+    model_name = str(metrics.get("model") or "")
+    output: dict[str, Any] = {
+        "target": target,
+        "selected_model_key": model_name,
+        "component_model_artifact": artifacts.get("models"),
+        "artifact_type": "model",
+        "primary_artifact": artifacts.get("models"),
+        "ensemble_artifacts": {},
+    }
+    if not model_name.startswith("ensemble_"):
+        return output
+    ensembles = summary.get("ensembles", {}) if isinstance(summary.get("ensembles"), dict) else {}
+    ensemble = ensembles.get(target, {}) if isinstance(ensembles.get(target), dict) else {}
+    ensemble_artifacts = ensemble.get("artifacts", {}) if isinstance(ensemble.get("artifacts"), dict) else {}
+    output.update(
+        {
+            "artifact_type": "ensemble",
+            "ensemble_method": model_name.removeprefix("ensemble_"),
+            "ensemble_artifacts": ensemble_artifacts,
+            "primary_artifact": ensemble_artifacts.get("weights") or artifacts.get("models"),
+            "component_model_artifact": artifacts.get("models"),
+        }
+    )
+    return output
+
+
 def write_operational_performance_html(summary: dict[str, Any], output_path: str | Path) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -377,8 +536,10 @@ def write_operational_performance_html(summary: dict[str, Any], output_path: str
         _html_section("Calibration", summary.get("calibration", {})),
         _html_section("Patch Ablation", summary.get("patch_ablation", {})),
         _html_section("Patch Improvement", summary.get("patch_improvement", {})),
+        _html_section("Variable Coverage", summary.get("variable_coverage", {})),
         _html_section("Ensembles", summary.get("ensembles", {})),
         _html_section("CatBoost", summary.get("catboost", {})),
+        _html_section("Production Model Manifest", summary.get("production_model_manifest", {})),
         _html_section("Ridge Residual Debug", summary.get("ridge_debug", {})),
         _html_section("Artifacts", summary.get("artifacts", {})),
         "</body></html>",
@@ -406,6 +567,7 @@ def run_operational_benchmark(
     frame = add_time_ordered_splits(frame, train_cycles=20, val_cycles=5, test_cycles=5)
     frame, true_patch_features = _with_true_grid_patch_features(frame, grid_patch_features)
     benchmark = _benchmark_info(frame)
+    variable_coverage = summarize_variable_coverage(frame)
     models: dict[str, Any] = {}
     predictions = frame.loc[frame["split"].eq("test"), ["station_id", "issue_time", "valid_time", "horizon_step", "temp", "humidity", "nwp_t2m", "nwp_humidity"]].copy()
     summary: dict[str, Any] = {
@@ -431,6 +593,7 @@ def run_operational_benchmark(
         "patch_modes_present": [],
         "patch_ablation_required_modes": ["no_patch", "proxy_patch5", "true_patch3", "true_patch5"],
         "patch_ablation_missing_modes": ["no_patch", "proxy_patch5", "true_patch3", "true_patch5"],
+        "variable_coverage": variable_coverage,
         "catboost": {},
         "ensembles": {},
         "best_operational_models": {},
@@ -438,6 +601,7 @@ def run_operational_benchmark(
         "artifacts": {},
     }
     grid = lgbm_grid or DEFAULT_LGBM_GRID
+    pd.DataFrame(variable_coverage.get("variables", [])).to_csv(output / "variable_coverage.csv", index=False)
     patch_modes = [
         {"mode": "no_patch", "feature_columns": [], "patch_feature_mode": "none"},
         {"mode": "proxy_patch5", "feature_columns": _station_neighbor_features(frame, 5), "patch_feature_mode": "station_neighborhood_proxy"},
@@ -472,12 +636,13 @@ def run_operational_benchmark(
         best_model: Pipeline | None = None
         best_test_prediction: np.ndarray | None = None
         best_validation_rmse = float("inf")
+        best_validation_metrics: dict[str, float | int] | None = None
         ablation_rows: list[dict[str, Any]] = []
         feature_importance_rows: list[pd.DataFrame] = []
         component_predictions: dict[str, dict[str, pd.DataFrame]] = {}
         for patch_mode in patch_modes:
             mode = str(patch_mode["mode"])
-            extra_features = list(patch_mode["feature_columns"])
+            extra_features = _target_patch_feature_columns(target_name, mode, list(patch_mode["feature_columns"]))
             patch_feature_mode = str(patch_mode["patch_feature_mode"])
             feature_cols = [column for column in [*BASE_FEATURES, *extra_features] if column in frame.columns]
             tuning = _tune_lgbm(frame, actual_column=actual, baseline_column=baseline, feature_columns=feature_cols, grid=grid)
@@ -538,12 +703,13 @@ def run_operational_benchmark(
                 fi.insert(0, "target", target_name)
                 fi.insert(1, "mode", mode)
                 feature_importance_rows.append(fi)
-            if float(holdout_metrics["rmse"]) < best_validation_rmse:
+            if _is_official_lgbm_candidate(target_name, mode) and float(holdout_metrics["rmse"]) < best_validation_rmse:
                 best_mode = mode
                 best_summary = ablation
                 best_model = model
                 best_test_prediction = final_prediction
                 best_validation_rmse = float(holdout_metrics["rmse"])
+                best_validation_metrics = holdout_metrics
                 summary["calibration"][target_name] = {
                     "mode": mode,
                     "selected": calibration.selected.to_jsonable() if use_corrected else CalibrationModel("none", {}).to_jsonable(),
@@ -562,7 +728,17 @@ def run_operational_benchmark(
                 "test": catboost_payload["test_prediction_frame"],
             }
             models[f"{target_name}_catboost"] = catboost_payload["model"]
-        ensemble_payload = build_ensemble_results(component_predictions, actual_column=actual, output_dir=output, target_name=target_name)
+        if best_validation_metrics is None:
+            best_validation_metrics = {"rmse": best_validation_rmse, "mae": float("nan"), "bias": float("nan"), "n": 0}
+        ensemble_payload = build_ensemble_results(
+            component_predictions,
+            actual_column=actual,
+            output_dir=output,
+            target_name=target_name,
+            baseline_validation_metrics=best_validation_metrics,
+            baseline_test_metrics=best_summary,
+            reject_if_bias_worse=target_name == "humidity",
+        )
         summary["ensembles"][target_name] = ensemble_payload["summary"]
         if ensemble_payload["best_test_prediction"] is not None:
             predictions[f"{target_name}_ensemble_prediction"] = ensemble_payload["best_test_prediction"]
@@ -580,7 +756,8 @@ def run_operational_benchmark(
             **summary["official_baselines"][target_name][lgbm_name],
         }
         ensemble_best = ensemble_payload["summary"].get("best") if isinstance(ensemble_payload["summary"], dict) else None
-        if isinstance(ensemble_best, dict) and ensemble_best.get("validation_rmse") is not None and float(ensemble_best["validation_rmse"]) < best_operational["validation_rmse"]:
+        ensemble_accepted = isinstance(ensemble_payload.get("summary"), dict) and ensemble_payload["summary"].get("selection_status") == "accepted"
+        if ensemble_accepted and isinstance(ensemble_best, dict) and ensemble_best.get("validation_rmse") is not None and float(ensemble_best["validation_rmse"]) < best_operational["validation_rmse"]:
             best_operational = {"model": f"ensemble_{ensemble_best['method']}", **ensemble_best}
         summary["best_operational_models"][target_name] = best_operational
         summary["metrics"][lgbm_name] = {"test": summary["official_baselines"][target_name][lgbm_name]}
@@ -605,9 +782,15 @@ def run_operational_benchmark(
         "predictions_test": str(output / "predictions_test.csv"),
         "joined_training_frame": str(output / "joined_training_frame.csv"),
         "models": str(output / "models.pkl"),
+        "variable_coverage": str(output / "variable_coverage.csv"),
     }
     summary["v4c_gate"] = evaluate_v4c_gate(summary)
     summary["site_readiness"] = evaluate_site_readiness_gate(summary)
+    manifest_path = output / "production_model_manifest.json"
+    manifest = build_production_model_manifest(summary)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+    summary["production_model_manifest"] = manifest
+    summary["artifacts"]["production_model_manifest"] = str(manifest_path)
     (output / "experiment_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
     write_operational_performance_html(summary, output / "operational_performance_report.html")
     _write_markdown_report(summary, output / "operational_performance_report.md")
@@ -615,14 +798,15 @@ def run_operational_benchmark(
 
 
 def load_joined_operational_frame(*, nwp_archive: str | Path, observations: str | Path, station_metadata: str | Path) -> pd.DataFrame:
-    nwp = pd.read_csv(nwp_archive, dtype={"station_id": str})
+    nwp = pd.read_csv(nwp_archive, dtype={"station_id": str}, low_memory=False)
     nwp["station_id"] = nwp["station_id"].astype(str)
     for column in ["forecast_init_time", "issue_time", "valid_time"]:
         if column in nwp.columns:
-            nwp[column] = pd.to_datetime(nwp[column], utc=True)
+            nwp[column] = pd.to_datetime(nwp[column], utc=True, format="mixed")
     if "issue_time" not in nwp.columns:
         nwp["issue_time"] = nwp["forecast_init_time"]
-    obs = pd.read_csv(observations, dtype={"station_id": str})
+    _normalize_nwp_columns_inplace(nwp)
+    obs = pd.read_csv(observations, dtype={"station_id": str}, low_memory=False)
     obs["station_id"] = obs["station_id"].astype(str)
     obs["obs_time_kst"] = pd.to_datetime(obs["datetime"], errors="coerce")
     obs["valid_time"] = obs["obs_time_kst"].dt.tz_localize("Asia/Seoul").dt.tz_convert("UTC")
@@ -636,8 +820,53 @@ def load_joined_operational_frame(*, nwp_archive: str | Path, observations: str 
     frame = nwp.merge(obs[["station_id", "valid_time", "temp", "humidity", "pressure", "wind_speed", "precipitation"]], on=["station_id", "valid_time"], how="inner")
     frame = frame.merge(stations[keep_station_cols], on="station_id", how="left")
     frame = pd.concat([frame, _cyc_features(frame["issue_time"], "issue"), _cyc_features(frame["valid_time"], "valid")], axis=1)
+    _add_operational_derived_features(frame)
     frame = frame.dropna(subset=["temp", "humidity", "nwp_t2m", "nwp_humidity"]).sort_values(["issue_time", "station_id", "horizon_step"]).reset_index(drop=True)
     return frame
+
+
+def _normalize_nwp_columns_inplace(frame: pd.DataFrame) -> None:
+    alias_pairs = {
+        "nwp_humidity": ["nwp_relative_humidity", "nwp_relative_humidity_2m", "gfs_relative_humidity_2m"],
+        "nwp_t2m": ["nwp_temp_2m_c", "gfs_temp_2m_c"],
+        "nwp_dew_point": ["nwp_dew_point_2m_c", "gfs_dew_point_2m_c"],
+        "nwp_sp": ["nwp_surface_pressure", "gfs_surface_pressure"],
+        "nwp_tp": ["nwp_total_precipitation", "gfs_total_precipitation"],
+    }
+    for canonical, aliases in alias_pairs.items():
+        if canonical not in frame.columns:
+            for alias in aliases:
+                if alias in frame.columns:
+                    frame[canonical] = frame[alias]
+                    break
+    for column in FULL_VARIABLE_COLUMNS:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    for column in ["nwp_t2m", "nwp_dew_point", "nwp_soil_temperature"]:
+        if column in frame.columns:
+            values = pd.to_numeric(frame[column], errors="coerce")
+            frame[column] = np.where(values > 150.0, values - 273.15, values)
+    for column in ["nwp_sp", "nwp_mslp"]:
+        if column in frame.columns:
+            values = pd.to_numeric(frame[column], errors="coerce")
+            frame[column] = np.where(values > 2000.0, values / 100.0, values)
+
+
+def _add_operational_derived_features(frame: pd.DataFrame) -> None:
+    if {"nwp_t2m", "nwp_dew_point"}.issubset(frame.columns):
+        frame["nwp_dewpoint_depression"] = pd.to_numeric(frame["nwp_t2m"], errors="coerce") - pd.to_numeric(frame["nwp_dew_point"], errors="coerce")
+    if {"nwp_u10", "nwp_v10"}.issubset(frame.columns):
+        u = pd.to_numeric(frame["nwp_u10"], errors="coerce")
+        v = pd.to_numeric(frame["nwp_v10"], errors="coerce")
+        if "nwp_wind_speed" not in frame.columns:
+            frame["nwp_wind_speed"] = np.sqrt(u * u + v * v)
+        if "nwp_wind_direction" not in frame.columns:
+            frame["nwp_wind_direction"] = (270.0 - np.degrees(np.arctan2(v, u))) % 360.0
+    if "nwp_humidity" in frame.columns:
+        rh = pd.to_numeric(frame["nwp_humidity"], errors="coerce").clip(lower=0.1, upper=99.9) / 100.0
+        frame["nwp_humidity_logit"] = np.log(rh / (1.0 - rh))
+    if {"nwp_t2m", "nwp_sp"}.issubset(frame.columns):
+        frame["nwp_temp_pressure_interaction"] = pd.to_numeric(frame["nwp_t2m"], errors="coerce") * pd.to_numeric(frame["nwp_sp"], errors="coerce")
 
 
 def add_time_ordered_splits(frame: pd.DataFrame, *, train_cycles: int, val_cycles: int, test_cycles: int) -> pd.DataFrame:
@@ -673,7 +902,7 @@ def _with_true_grid_patch_features(frame: pd.DataFrame, feature_csv: str | Path 
     path = Path(feature_csv)
     if not path.exists():
         raise FileNotFoundError(path)
-    features = pd.read_csv(path, dtype={"station_id": str})
+    features = pd.read_csv(path, dtype={"station_id": str}, low_memory=False)
     if features.empty:
         return frame, {}
     if "patch_feature_mode" not in features.columns:
@@ -728,6 +957,33 @@ def patch_ablation_status(modes: Iterable[str]) -> dict[str, Any]:
         "patch_ablation_required_modes": required,
         "patch_ablation_missing_modes": missing,
     }
+
+
+def _target_patch_feature_columns(target_name: str, mode: str, columns: list[str]) -> list[str]:
+    """Apply target-specific patch policy without forcing one shared pipeline.
+
+    Temperature keeps the full true-grid/proxy patch feature set because G025 showed
+    patch5 helped temperature. Humidity keeps `no_patch` as the reference path and
+    only lets moisture-regime true-grid patch summaries compete, avoiding the broad
+    patch noise that worsened the G025 medium humidity ensemble.
+    """
+
+    if target_name != "humidity" or mode == "no_patch":
+        return columns
+    if mode == "proxy_patch5":
+        return []
+    return [column for column in columns if any(hint in column for hint in HUMIDITY_PATCH_VARIABLE_HINTS)]
+
+
+def _is_official_lgbm_candidate(target_name: str, mode: str) -> bool:
+    """Return whether a patch mode may define the official residual LGBM path.
+
+    G026 deliberately keeps humidity's official residual LightGBM baseline pinned
+    to no-patch. Moisture patch variants still run as ablations and ensemble
+    candidates, but they do not replace the target-specific official baseline.
+    """
+
+    return target_name != "humidity" or mode == "no_patch"
 
 
 def _fit_calibration_model(frame: pd.DataFrame, *, actual_column: str, prediction_column: str, name: str) -> CalibrationModel:
@@ -827,6 +1083,7 @@ def _tune_lgbm(frame: pd.DataFrame, *, actual_column: str, baseline_column: str,
     train = frame.loc[frame["split"].eq("train")].copy()
     val = frame.loc[frame["split"].eq("val")].copy()
     test = frame.loc[frame["split"].eq("test")].copy()
+    feature_columns = _drop_train_all_missing_features(train, feature_columns)
     categorical = [column for column in ["station_id", "region", "region_class"] if column in feature_columns]
     numeric = [column for column in feature_columns if column not in categorical]
     best: dict[str, Any] | None = None
@@ -877,6 +1134,7 @@ def _fit_optional_catboost(frame: pd.DataFrame, *, actual_column: str, baseline_
     train = frame.loc[frame["split"].eq("train")].copy()
     val = frame.loc[frame["split"].eq("val")].copy()
     test = frame.loc[frame["split"].eq("test")].copy()
+    feature_columns = _drop_train_all_missing_features(train, feature_columns)
     cat_columns = [column for column in ["station_id", "region", "region_class", "horizon_step"] if column in feature_columns]
     cat_indices = [feature_columns.index(column) for column in cat_columns]
     model = CatBoostRegressor(
@@ -919,6 +1177,9 @@ def build_ensemble_results(
     actual_column: str,
     output_dir: str | Path,
     target_name: str,
+    baseline_validation_metrics: dict[str, Any] | None = None,
+    baseline_test_metrics: dict[str, Any] | None = None,
+    reject_if_bias_worse: bool = False,
 ) -> dict[str, Any]:
     if len(components) < 2:
         return {"summary": {"status": "skipped", "reason": "fewer than two components"}, "best_test_prediction": None}
@@ -933,6 +1194,8 @@ def build_ensemble_results(
     constrained = _constrained_least_squares_weights(val_matrix, val_actual)
     if constrained is not None:
         methods["constrained_least_squares"] = constrained
+    baseline_validation_rmse = float((baseline_validation_metrics or {}).get("rmse", float("inf")))
+    baseline_validation_bias_abs = abs(float((baseline_validation_metrics or {}).get("bias", float("inf"))))
     rows: list[dict[str, Any]] = []
     predictions_by_method: dict[str, np.ndarray] = {}
     weight_payload: dict[str, Any] = {}
@@ -941,7 +1204,7 @@ def build_ensemble_results(
         test_prediction = _weighted_prediction(test_matrix, weights)
         val_metrics = metric_dict(val_actual, val_prediction)
         test_metrics = metric_dict(test_actual, test_prediction)
-        rows.append({"method": method, "validation_rmse": val_metrics["rmse"], **{f"test_{k}": v for k, v in test_metrics.items()}})
+        rows.append({"method": method, "validation_rmse": val_metrics["rmse"], "validation_bias": val_metrics["bias"], **{f"test_{k}": v for k, v in test_metrics.items()}})
         predictions_by_method[method] = test_prediction
         weight_payload[method] = weights
     for group_method, group_column in [("horizonwise_inverse_rmse", "horizon_step"), ("stationwise_inverse_rmse", "station_id")]:
@@ -955,11 +1218,19 @@ def build_ensemble_results(
         )
         val_metrics = metric_dict(val_actual, val_prediction)
         test_metrics = metric_dict(test_actual, test_prediction)
-        rows.append({"method": group_method, "validation_rmse": val_metrics["rmse"], **{f"test_{k}": v for k, v in test_metrics.items()}})
+        rows.append({"method": group_method, "validation_rmse": val_metrics["rmse"], "validation_bias": val_metrics["bias"], **{f"test_{k}": v for k, v in test_metrics.items()}})
         predictions_by_method[group_method] = test_prediction
         weight_payload[group_method] = weights
     best = min(rows, key=lambda row: float(row["validation_rmse"]))
     best_method = str(best["method"])
+    accepted = True
+    rejected_reasons: list[str] = []
+    if np.isfinite(baseline_validation_rmse) and float(best["validation_rmse"]) >= baseline_validation_rmse:
+        accepted = False
+        rejected_reasons.append("validation holdout RMSE did not improve over target-specific baseline")
+    if reject_if_bias_worse and np.isfinite(baseline_validation_bias_abs) and abs(float(best.get("validation_bias", 0.0))) > baseline_validation_bias_abs:
+        accepted = False
+        rejected_reasons.append("validation holdout bias magnitude worsened versus humidity baseline")
     output = Path(output_dir)
     pd.DataFrame(rows).to_csv(output / f"{target_name}_ensemble_component_metrics.csv", index=False)
     (output / f"{target_name}_ensemble_weights.json").write_text(json.dumps(weight_payload, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
@@ -970,15 +1241,20 @@ def build_ensemble_results(
     prediction_frame.to_csv(output / f"{target_name}_ensemble_predictions_test.csv", index=False)
     _write_ensemble_scatter(test_actual, predictions_by_method[best_method], target_name=target_name, output_dir=output)
     summary = {
-        "status": "trained",
+        "status": "accepted" if accepted else "rejected",
+        "selection_status": "accepted" if accepted else "rejected",
+        "rejected_reasons": rejected_reasons,
         "best": {
             "method": best_method,
             "validation_rmse": best["validation_rmse"],
+            "validation_bias": best.get("validation_bias"),
             "rmse": best["test_rmse"],
             "mae": best["test_mae"],
             "bias": best["test_bias"],
             "n": best["test_n"],
         },
+        "baseline_validation_metrics": baseline_validation_metrics or {},
+        "baseline_test_metrics": baseline_test_metrics or {},
         "methods": rows,
         "artifacts": {
             "weights": str(output / f"{target_name}_ensemble_weights.json"),
@@ -987,7 +1263,7 @@ def build_ensemble_results(
             "scatter": str(output / f"{target_name}_baseline_vs_final_scatter.png"),
         },
     }
-    return {"summary": summary, "best_test_prediction": predictions_by_method[best_method]}
+    return {"summary": summary, "best_test_prediction": predictions_by_method[best_method] if accepted else None}
 
 
 def _component_matrix(
@@ -1089,21 +1365,24 @@ def _write_ensemble_scatter(actual: pd.Series, prediction: np.ndarray, *, target
         import matplotlib.pyplot as plt
     except Exception:  # pragma: no cover
         return
-    fig, ax = plt.subplots(figsize=(5, 5))
-    ax.scatter(actual, prediction, s=8, alpha=0.35)
-    lo = float(min(np.nanmin(actual), np.nanmin(prediction)))
-    hi = float(max(np.nanmax(actual), np.nanmax(prediction)))
-    ax.plot([lo, hi], [lo, hi], color="black", linewidth=1)
-    ax.set_xlabel("actual")
-    ax.set_ylabel("ensemble prediction")
-    ax.set_title(f"{target_name} ensemble prediction")
-    fig.tight_layout()
-    fig.savefig(output_dir / f"{target_name}_baseline_vs_final_scatter.png", dpi=140)
-    plt.close(fig)
+    try:
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.scatter(actual, prediction, s=8, alpha=0.35)
+        lo = float(min(np.nanmin(actual), np.nanmin(prediction)))
+        hi = float(max(np.nanmax(actual), np.nanmax(prediction)))
+        ax.plot([lo, hi], [lo, hi], color="black", linewidth=1)
+        ax.set_xlabel("actual")
+        ax.set_ylabel("ensemble prediction")
+        ax.set_title(f"{target_name} ensemble prediction")
+        fig.tight_layout()
+        fig.savefig(output_dir / f"{target_name}_baseline_vs_final_scatter.png", dpi=140)
+        plt.close(fig)
+    except Exception:  # pragma: no cover - headless matplotlib runtime.
+        return
 
 
 def _fit_ridge_debug(frame: pd.DataFrame, *, actual_column: str, baseline_column: str, target_name: str, output_dir: Path) -> dict[str, Any]:
-    feature_cols = [column for column in BASE_FEATURES if column in frame.columns]
+    feature_cols = _drop_train_all_missing_features(frame.loc[frame["split"].eq("train")], [column for column in BASE_FEATURES if column in frame.columns])
     train = frame.loc[frame["split"].eq("train")].copy()
     test = frame.loc[frame["split"].eq("test")].copy()
     categorical = [column for column in ["station_id", "region", "region_class"] if column in feature_cols]
@@ -1124,6 +1403,21 @@ def _fit_ridge_debug(frame: pd.DataFrame, *, actual_column: str, baseline_column
     _write_ridge_debug_markdown(debug, output_dir / f"{target_name}_ridge_residual_debug_report.md")
     _write_ridge_debug_plots(debug_frame, target_name=target_name, actual_column=actual_column, output_dir=output_dir)
     return {"model": model, "debug": debug, "test_prediction": prediction}
+
+
+def _drop_train_all_missing_features(train: pd.DataFrame, feature_columns: list[str]) -> list[str]:
+    categorical_candidates = {"station_id", "region", "region_class"}
+    usable: list[str] = []
+    for column in feature_columns:
+        if column not in train.columns:
+            continue
+        if column in categorical_candidates:
+            if train[column].notna().any():
+                usable.append(column)
+            continue
+        if pd.to_numeric(train[column], errors="coerce").notna().any():
+            usable.append(column)
+    return usable
 
 
 def _preprocessor(numeric: list[str], categorical: list[str]) -> ColumnTransformer:

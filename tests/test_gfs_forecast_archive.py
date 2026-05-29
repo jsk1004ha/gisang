@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from weather_korea_forecast.data.gfs_forecast_archive import build_gfs_prepared_forecast, gfs_nomads_filter_url
+from weather_korea_forecast.data.gfs_surface_forecast import MESSAGE_SPECS, _append_nwp_aliases
 
 
 def test_gfs_local_table_maps_to_prepared_schema_and_nearest_station_grid() -> None:
@@ -47,3 +48,29 @@ def test_gfs_nomads_filter_url_documents_http_download_skeleton() -> None:
     assert "var_TMP=on" in url
     assert "var_UGRD=on" in url
     assert "leftlon=124" in url
+
+
+def test_gfs_surface_forecast_supports_full_variable_aliases() -> None:
+    assert MESSAGE_SPECS["gust"][:2] == ("GUST", "surface")
+    assert MESSAGE_SPECS["spfh2m"][:2] == ("SPFH", "2 m above ground")
+    assert MESSAGE_SPECS["pwat"][:2] == ("PWAT", "entire atmosphere (considered as a single layer)")
+    row: dict[str, object] = {
+        "gfs_gust": 12.0,
+        "gfs_total_cloud_cover": 80.0,
+        "gfs_low_cloud_cover": 20.0,
+        "gfs_specific_humidity_2m": 0.006,
+        "gfs_precipitable_water": 18.0,
+        "gfs_mean_sea_level_pressure": 1013.2,
+        "gfs_u10": 3.0,
+        "gfs_v10": 4.0,
+    }
+
+    _append_nwp_aliases(row)
+
+    assert row["nwp_gust"] == 12.0
+    assert row["nwp_cloud_cover"] == 80.0
+    assert row["nwp_low_cloud_cover"] == 20.0
+    assert row["nwp_specific_humidity"] == 0.006
+    assert row["nwp_pwat"] == 18.0
+    assert row["nwp_mslp"] == 1013.2
+    assert row["nwp_wind_speed"] == 5.0

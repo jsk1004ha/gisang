@@ -8,12 +8,14 @@ import pytest
 
 import weather_korea_forecast.v4.operational_performance as operational_performance
 from weather_korea_forecast.v4.operational_performance import (
+    build_production_model_manifest,
     build_ensemble_results,
     classify_benchmark_reliability,
     evaluate_site_readiness_gate,
     evaluate_v4c_gate,
     fit_calibration_candidates,
     residual_debug_summary,
+    summarize_variable_coverage,
     summarize_patch_ablation_results,
     validate_lgbm_grid_results,
     write_operational_performance_html,
@@ -25,6 +27,44 @@ def test_benchmark_reliability_classifies_short_medium_strong_and_seasonal() -> 
     assert classify_benchmark_reliability(forecast_cycle_count=90, date_span_days=23, season_count=1) == "medium"
     assert classify_benchmark_reliability(forecast_cycle_count=180, date_span_days=46, season_count=2) == "strong"
     assert classify_benchmark_reliability(forecast_cycle_count=1200, date_span_days=366, season_count=4) == "seasonal"
+
+
+def test_full_variable_coverage_reports_available_and_missing_columns() -> None:
+    frame = pd.DataFrame(
+        {
+            "nwp_t2m": [10.0, 11.0],
+            "nwp_gust": [4.0, None],
+            "nwp_specific_humidity": [0.004, 0.005],
+        }
+    )
+
+    summary = summarize_variable_coverage(frame, variables=["nwp_t2m", "nwp_gust", "nwp_pwat", "nwp_specific_humidity"])
+
+    by_variable = {row["variable"]: row for row in summary["variables"]}
+    assert summary["full_variable_count"] == 3
+    assert by_variable["nwp_t2m"]["coverage"] == 1.0
+    assert by_variable["nwp_gust"]["coverage"] == 0.5
+    assert by_variable["nwp_pwat"]["present"] is False
+    assert "nwp_pwat" in summary["missing_variables"]
+
+
+def test_full_variable_coverage_reports_split_specific_train_availability() -> None:
+    frame = pd.DataFrame(
+        {
+            "split": ["train", "train", "val", "test"],
+            "nwp_t2m": [10.0, 11.0, 12.0, 13.0],
+            "nwp_pwat": [None, None, 18.0, 19.0],
+        }
+    )
+
+    summary = summarize_variable_coverage(frame, variables=["nwp_t2m", "nwp_pwat"])
+
+    by_variable = {row["variable"]: row for row in summary["variables"]}
+    assert by_variable["nwp_t2m"]["train_coverage"] == 1.0
+    assert by_variable["nwp_pwat"]["coverage"] == 0.5
+    assert by_variable["nwp_pwat"]["train_coverage"] == 0.0
+    assert by_variable["nwp_pwat"]["val_coverage"] == 1.0
+    assert by_variable["nwp_pwat"]["test_coverage"] == 1.0
 
 
 def test_time_ordered_splits_use_full_medium_archive() -> None:
@@ -198,6 +238,30 @@ def test_true_patch_feature_loader_rejects_metadata_only_patch_file(tmp_path) ->
         operational_performance._with_true_grid_patch_features(frame, feature_csv)  # noqa: SLF001
 
 
+def test_humidity_patch_policy_keeps_no_patch_and_filters_moisture_features() -> None:
+    columns = [
+        "true_patch5_nwp_t2m_patch_mean",
+        "true_patch5_nwp_humidity_patch_mean",
+        "true_patch5_nwp_pwat_patch_mean",
+        "true_patch5_nwp_u10_patch_mean",
+        "true_patch5_nwp_sp_patch_mean",
+    ]
+
+    assert operational_performance._target_patch_feature_columns("humidity", "no_patch", columns) == columns  # noqa: SLF001
+    filtered = operational_performance._target_patch_feature_columns("humidity", "true_patch5", columns)  # noqa: SLF001
+
+    assert "true_patch5_nwp_humidity_patch_mean" in filtered
+    assert "true_patch5_nwp_pwat_patch_mean" in filtered
+    assert "true_patch5_nwp_u10_patch_mean" not in filtered
+    assert "true_patch5_nwp_sp_patch_mean" not in filtered
+
+
+def test_humidity_official_lgbm_candidate_is_pinned_to_no_patch() -> None:
+    assert operational_performance._is_official_lgbm_candidate("humidity", "no_patch") is True  # noqa: SLF001
+    assert operational_performance._is_official_lgbm_candidate("humidity", "true_patch5") is False  # noqa: SLF001
+    assert operational_performance._is_official_lgbm_candidate("temp", "true_patch5") is True  # noqa: SLF001
+
+
 def test_lgbm_grid_result_schema_requires_tuning_columns() -> None:
     validate_lgbm_grid_results(
         [
@@ -246,10 +310,77 @@ def test_ensemble_weights_schema_and_best_selection(tmp_path) -> None:
 
     result = build_ensemble_results(components, actual_column="actual", output_dir=tmp_path, target_name="temp")
 
-    assert result["summary"]["status"] == "trained"
+    assert result["summary"]["status"] == "accepted"
     assert result["summary"]["best"]["rmse"] == 0.0
     assert (tmp_path / "temp_ensemble_weights.json").exists()
     assert (tmp_path / "temp_ensemble_component_metrics.csv").exists()
+
+
+def test_humidity_ensemble_rejects_when_holdout_or_bias_worsens(tmp_path) -> None:
+    val = pd.DataFrame(
+        {
+            "station_id": ["108", "108", "112", "112"],
+            "issue_time": pd.to_datetime(["2026-05-01T00:00Z"] * 4),
+            "valid_time": pd.to_datetime(["2026-05-01T01:00Z", "2026-05-01T02:00Z"] * 2),
+            "horizon_step": [1, 2, 1, 2],
+            "actual": [50.0, 50.0, 50.0, 50.0],
+        }
+    )
+    components = {
+        "baseline_like": {"val": val.assign(prediction=[50.2, 49.8, 50.1, 49.9]), "test": val.assign(prediction=[50.2, 49.8, 50.1, 49.9])},
+        "biased": {"val": val.assign(prediction=[45.0, 45.0, 45.0, 45.0]), "test": val.assign(prediction=[45.0, 45.0, 45.0, 45.0])},
+    }
+
+    result = build_ensemble_results(
+        components,
+        actual_column="actual",
+        output_dir=tmp_path,
+        target_name="humidity",
+        baseline_validation_metrics={"rmse": 0.2, "bias": 0.0},
+        baseline_test_metrics={"rmse": 0.2, "bias": 0.0},
+        reject_if_bias_worse=True,
+    )
+
+    assert result["summary"]["selection_status"] == "rejected"
+    assert result["best_test_prediction"] is None
+    assert result["summary"]["rejected_reasons"]
+
+
+def test_humidity_ensemble_selection_does_not_use_test_bias_for_rejection(tmp_path) -> None:
+    val = pd.DataFrame(
+        {
+            "station_id": ["108", "108", "112", "112"],
+            "issue_time": pd.to_datetime(["2026-05-01T00:00Z"] * 4),
+            "valid_time": pd.to_datetime(["2026-05-01T01:00Z", "2026-05-01T02:00Z"] * 2),
+            "horizon_step": [1, 2, 1, 2],
+            "actual": [50.0, 51.0, 52.0, 53.0],
+        }
+    )
+    test = val.copy()
+    components = {
+        "perfect_holdout_bad_test_a": {
+            "val": val.assign(prediction=[50.0, 51.0, 52.0, 53.0]),
+            "test": test.assign(prediction=[40.0, 41.0, 42.0, 43.0]),
+        },
+        "perfect_holdout_bad_test_b": {
+            "val": val.assign(prediction=[50.0, 51.0, 52.0, 53.0]),
+            "test": test.assign(prediction=[40.0, 41.0, 42.0, 43.0]),
+        },
+    }
+
+    result = build_ensemble_results(
+        components,
+        actual_column="actual",
+        output_dir=tmp_path,
+        target_name="humidity",
+        baseline_validation_metrics={"rmse": 0.5, "bias": 0.0},
+        baseline_test_metrics={"rmse": 0.5, "bias": 0.0},
+        reject_if_bias_worse=True,
+    )
+
+    assert result["summary"]["selection_status"] == "accepted"
+    assert result["summary"]["best"]["bias"] == -10.0
+    assert result["best_test_prediction"] is not None
 
 
 def test_catboost_optional_skip(monkeypatch) -> None:
@@ -264,6 +395,39 @@ def test_catboost_optional_skip(monkeypatch) -> None:
     )
 
     assert result["summary"]["status"] == "skipped"
+
+
+def test_production_model_manifest_uses_target_specific_best_models() -> None:
+    summary = {
+        "benchmark_reliability": "strong",
+        "best_operational_models": {
+            "temp": {"model": "ensemble_horizonwise_inverse_rmse", "rmse": 1.49, "mae": 1.1, "bias": 0.05},
+            "humidity": {"model": "operational_residual_lgbm_humidity", "rmse": 9.8, "mae": 7.5, "bias": -1.0},
+        },
+        "v4c_gate": {"status": "PASS"},
+        "site_readiness": {"status": "PASS"},
+        "artifacts": {"models": "models.pkl"},
+        "ensembles": {
+            "temp": {
+                "artifacts": {
+                    "weights": "temp_ensemble_weights.json",
+                    "metrics": "temp_ensemble_component_metrics.csv",
+                }
+            }
+        },
+    }
+
+    manifest = build_production_model_manifest(summary)
+
+    assert manifest["target_specific_models"] is True
+    assert manifest["temp_model"] == "ensemble_horizonwise_inverse_rmse"
+    assert manifest["humidity_model"] == "operational_residual_lgbm_humidity"
+    assert manifest["temp_artifact_type"] == "ensemble"
+    assert manifest["temp_model_artifact"] == "temp_ensemble_weights.json"
+    assert manifest["temp_artifacts"]["component_model_artifact"] == "models.pkl"
+    assert manifest["humidity_artifact_type"] == "model"
+    assert manifest["humidity_model_artifact"] == "models.pkl"
+    assert manifest["operational_beta_allowed"] is True
 
 
 def test_v4c_and_site_readiness_keep_short_benchmark_caveat() -> None:

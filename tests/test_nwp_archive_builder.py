@@ -64,6 +64,25 @@ def test_archive_builder_accepts_sufficient_archive(tmp_path: Path) -> None:
     assert report.forecast_archive_adequate is True
 
 
+def test_archive_builder_preserves_mixed_iso_and_space_timestamp_formats(tmp_path: Path) -> None:
+    first = _forecast_rows(stations=20, cycles=30)
+    second = _forecast_rows(stations=20, cycles=30)
+    for column in ["forecast_init_time", "issue_time", "valid_time"]:
+        second[column] = pd.to_datetime(second[column], utc=True) + pd.Timedelta(days=10)
+        second[column] = second[column].dt.strftime("%Y-%m-%d %H:%M:%S%z")
+    csv_a = tmp_path / "iso.csv"
+    csv_b = tmp_path / "space.csv"
+    first.to_csv(csv_a, index=False)
+    second.to_csv(csv_b, index=False)
+
+    archive, report = build_prepared_forecast_archive([csv_a, csv_b], min_stations=20, min_issue_cycles=60)
+
+    assert archive["forecast_init_time"].isna().sum() == 0
+    assert report.forecast_init_time_count == 60
+    assert report.duplicate_count == 0
+    assert report.forecast_source_schema_valid is True
+
+
 def test_archive_builder_rejects_smoke_as_adequate(tmp_path: Path) -> None:
     frame = normalize_prepared_forecast_archive(_forecast_rows(stations=20, cycles=30, source="synthetic_smoke"))
     report = evaluate_archive_quality(frame, source_paths=["synthetic_smoke.csv"])

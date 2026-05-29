@@ -1,3 +1,9 @@
+## G026 - Accuracy Breakthrough Sprint
+
+- Added full-variable GFS schema support for station-nearest and true-grid patch extraction, including gust, cloud, radiation, soil temperature, land/sea mask, specific humidity, precipitable water, precipitation rate, and mean sea-level pressure.
+- Added operational benchmark variable coverage reporting, target-specific production model manifests, humidity-focused patch filtering, and ensemble acceptance/rejection reasons.
+- Documented the G026 strong-archive workflow and the full-variable public S3 size caveat.
+
 ## G025 - Operational Model Accuracy Sprint
 
 ### Added

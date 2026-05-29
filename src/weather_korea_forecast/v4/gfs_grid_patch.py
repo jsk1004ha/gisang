@@ -18,7 +18,17 @@ GFS_MESSAGE_COLUMNS = {
     ("10u", "heightAboveGround", 10): "nwp_u10",
     ("10v", "heightAboveGround", 10): "nwp_v10",
     ("tp", "surface", 0): "nwp_tp",
+    ("gust", "surface", 0): "nwp_gust",
     ("tcc", "atmosphere", 0): "nwp_cloud_cover",
+    ("lcc", "lowCloudLayer", 0): "nwp_low_cloud_cover",
+    ("sdswrf", "surface", 0): "nwp_shortwave_radiation",
+    ("sdlwrf", "surface", 0): "nwp_longwave_radiation",
+    ("st", "depthBelowLandLayer", 0): "nwp_soil_temperature",
+    ("lsm", "surface", 0): "nwp_land_sea_mask",
+    ("2sh", "heightAboveGround", 2): "nwp_specific_humidity",
+    ("pwat", "atmosphereSingleLayer", 0): "nwp_pwat",
+    ("prate", "surface", 0): "nwp_precip_rate",
+    ("prmsl", "meanSea", 0): "nwp_mslp",
 }
 PATCH_FEATURE_MODE = "true_gfs_grid_patch"
 
@@ -99,9 +109,9 @@ def parse_gfs_grib_filename(path: str | Path) -> tuple[pd.Timestamp, int]:
 
 
 def normalize_gfs_grid_value(column: str, value: float) -> float:
-    if column in {"nwp_t2m", "nwp_dew_point"} and value > 150.0:
+    if column in {"nwp_t2m", "nwp_dew_point", "nwp_soil_temperature"} and value > 150.0:
         return float(value - 273.15)
-    if column == "nwp_sp" and value > 2000.0:
+    if column in {"nwp_sp", "nwp_mslp"} and value > 2000.0:
         return float(value / 100.0)
     return float(value)
 

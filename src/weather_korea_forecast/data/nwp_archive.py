@@ -133,7 +133,7 @@ def normalize_prepared_forecast_archive(frame: pd.DataFrame) -> pd.DataFrame:
         normalized["station_id"] = normalized["station_id"].astype(str)
     for column in ("forecast_init_time", "issue_time", "valid_time"):
         if column in normalized.columns:
-            normalized[column] = pd.to_datetime(normalized[column], utc=True, errors="coerce")
+            normalized[column] = pd.to_datetime(normalized[column], utc=True, errors="coerce", format="mixed")
     if "horizon_step" in normalized.columns:
         normalized["horizon_step"] = pd.to_numeric(normalized["horizon_step"], errors="coerce").astype("Int64")
     for column in TEMP_COLUMNS:

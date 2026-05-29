@@ -24,6 +24,17 @@ MESSAGE_SPECS = {
     "u10": ("UGRD", "10 m above ground", "gfs_u10"),
     "v10": ("VGRD", "10 m above ground", "gfs_v10"),
     "tp": ("APCP", "surface", "gfs_total_precipitation"),
+    "gust": ("GUST", "surface", "gfs_gust"),
+    "tcc": ("TCDC", "entire atmosphere", "gfs_total_cloud_cover"),
+    "lcc": ("LCDC", "low cloud layer", "gfs_low_cloud_cover"),
+    "dswrf": ("DSWRF", "surface", "gfs_shortwave_radiation"),
+    "dlwrf": ("DLWRF", "surface", "gfs_longwave_radiation"),
+    "tssoil": ("TSOIL", "0-0.1 m below ground", "gfs_soil_temperature_c"),
+    "land": ("LAND", "surface", "gfs_land_sea_mask"),
+    "spfh2m": ("SPFH", "2 m above ground", "gfs_specific_humidity_2m"),
+    "pwat": ("PWAT", "entire atmosphere (considered as a single layer)", "gfs_precipitable_water"),
+    "prate": ("PRATE", "surface", "gfs_precipitation_rate"),
+    "prmsl": ("PRMSL", "mean sea level", "gfs_mean_sea_level_pressure"),
 }
 
 CFGRIB_NAMES = {
@@ -34,6 +45,17 @@ CFGRIB_NAMES = {
     "gfs_u10": "u10",
     "gfs_v10": "v10",
     "gfs_total_precipitation": "tp",
+    "gfs_gust": "gust",
+    "gfs_total_cloud_cover": "tcc",
+    "gfs_low_cloud_cover": "lcc",
+    "gfs_shortwave_radiation": "sdswrf",
+    "gfs_longwave_radiation": "sdlwrf",
+    "gfs_soil_temperature_c": "st",
+    "gfs_land_sea_mask": "lsm",
+    "gfs_specific_humidity_2m": "sh2",
+    "gfs_precipitable_water": "pwat",
+    "gfs_precipitation_rate": "prate",
+    "gfs_mean_sea_level_pressure": "prmsl",
 }
 
 
@@ -172,6 +194,8 @@ def _extract_station_values(grib_path: Path, stations: pd.DataFrame) -> dict[str
                 value = float(data_array.sel(latitude=lat, longitude=lon, method="nearest").item())
                 if canonical.endswith("_c"):
                     value = _kelvin_to_celsius_if_needed(value)
+                if canonical in {"gfs_surface_pressure", "gfs_mean_sea_level_pressure"} and value > 2000.0:
+                    value = value / 100.0
                 values_by_station[str(row.station_id)][canonical] = value
     for values in values_by_station.values():
         _append_nwp_aliases(values)
@@ -193,10 +217,33 @@ def _append_nwp_aliases(row: dict[str, object]) -> None:
         row.setdefault("nwp_v10", row["gfs_v10"])
     if "gfs_total_precipitation" in row:
         row.setdefault("nwp_total_precipitation", row["gfs_total_precipitation"])
+    if "gfs_gust" in row:
+        row.setdefault("nwp_gust", row["gfs_gust"])
+    if "gfs_total_cloud_cover" in row:
+        row.setdefault("nwp_cloud_cover", row["gfs_total_cloud_cover"])
+    if "gfs_low_cloud_cover" in row:
+        row.setdefault("nwp_low_cloud_cover", row["gfs_low_cloud_cover"])
+    if "gfs_shortwave_radiation" in row:
+        row.setdefault("nwp_shortwave_radiation", row["gfs_shortwave_radiation"])
+    if "gfs_longwave_radiation" in row:
+        row.setdefault("nwp_longwave_radiation", row["gfs_longwave_radiation"])
+    if "gfs_soil_temperature_c" in row:
+        row.setdefault("nwp_soil_temperature", row["gfs_soil_temperature_c"])
+    if "gfs_land_sea_mask" in row:
+        row.setdefault("nwp_land_sea_mask", row["gfs_land_sea_mask"])
+    if "gfs_specific_humidity_2m" in row:
+        row.setdefault("nwp_specific_humidity", row["gfs_specific_humidity_2m"])
+    if "gfs_precipitable_water" in row:
+        row.setdefault("nwp_pwat", row["gfs_precipitable_water"])
+    if "gfs_precipitation_rate" in row:
+        row.setdefault("nwp_precip_rate", row["gfs_precipitation_rate"])
+    if "gfs_mean_sea_level_pressure" in row:
+        row.setdefault("nwp_mslp", row["gfs_mean_sea_level_pressure"])
     if "nwp_u10" in row and "nwp_v10" in row:
         u = float(row["nwp_u10"])
         v = float(row["nwp_v10"])
         row.setdefault("nwp_wind_speed", float(np.sqrt(u * u + v * v)))
+        row.setdefault("nwp_wind_direction", float((270.0 - np.degrees(np.arctan2(v, u))) % 360.0))
 
 
 def _kelvin_to_celsius_if_needed(value: float) -> float:

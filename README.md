@@ -332,6 +332,10 @@ Official operational baselines are `raw_gfs_t2m` and `operational_residual_lgbm_
 
 G025 extends the operational benchmark to a 90-cycle medium archive and adds true GFS GRIB-grid patch features. Use `weather_korea_forecast.v4.gfs_grid_patch` to build ignored patch feature CSVs, then pass them to the operational runner with `--grid-patch-features`. The runner labels `patch_feature_mode` as `station_neighborhood_proxy` or `true_gfs_grid_patch`, uses all cycles for medium-or-larger archives with a time-ordered split, writes ensemble artifacts, and always emits `operational_performance_report.html`. See `docs/G025_OPERATIONAL_ACCURACY.md`.
 
+### G026 accuracy breakthrough sprint
+
+G026 targets the remaining operational gates with a strong real-forecast archive path, full-variable GFS support, target-specific model selection, and stricter humidity ensemble rejection. The operational runner now records overall and split-specific full-variable coverage, writes `production_model_manifest.json` with target artifact types/ensemble artifact paths, and separates temperature patch/ensemble selection from humidity no-patch calibration. Full-variable S3 extraction can be large; if it cannot complete in the local runtime, reports must document the blocker instead of promoting the full-variable path. See `docs/G026_ACCURACY_BREAKTHROUGH.md`. Local strong-core evidence reached temperature RMSE 1.694°C and humidity RMSE 10.396%p, so V4-C/site beta remain WARN/FAIL until further data-variable enrichment improves both gates.
+
 `data.future_features.column_mapping`은 forecast CSV 컬럼을 학습 feature 이름으로 매핑한다. 예: `era5_t2m: gfs_t2m`, `era5_sp: gfs_sp`, `era5_u10: gfs_u10`, `era5_v10: gfs_v10`, `era5_tp: gfs_tp`. `issue_time`이 있으면 `forecast_init_time` 이하의 최신 run을 선택한다. 운영 추론에서는 미래 weather covariate가 모든 horizon에 없으면 실행을 중단한다.
 
 ### V2 기본 실험 config
