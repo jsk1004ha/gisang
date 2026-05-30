@@ -54,6 +54,11 @@ result/
 data/raw/
 data/interim/
 data/processed/
+data/forecasts/
+
+# Generated site data / local dashboard exports
+web/data/
+gisang_forecast_dashboard.html
 
 .omx
 

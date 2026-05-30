@@ -20,3 +20,5 @@ Endpoints:
 - `GET /api/evaluation/summary`
 
 Responses include warnings when `operational_valid=false` or `backtest_only=true`.
+
+For G031, `/api/model/status` also reads the frozen G030 `production_model_manifest.json` when available and returns benchmark reliability, site readiness, temperature/humidity RMSE, target status, beta label requirements, rule-based weather-code status, manifest caveats, and the frozen `forecast_points.v2-beta-sources` schema version.

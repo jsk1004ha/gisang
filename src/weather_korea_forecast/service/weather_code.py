@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import Any
 
+from weather_korea_forecast.service.beta_sources import normalize_probability_fraction
+
 
 @dataclass(frozen=True)
 class WeatherCodeResult:
@@ -46,6 +48,7 @@ def weather_code_for_values(
     humidity_percent: Any = None,
     precip_mm: Any = None,
     precip_probability: Any = None,
+    precip_probability_unit: str = "auto",
     cloud_cover_percent: Any = None,
     wind_speed_ms: Any = None,
     dew_point_c: Any = None,
@@ -53,7 +56,7 @@ def weather_code_for_values(
     temp = _float(temperature_c)
     humidity = _float(humidity_percent)
     precip = _float(precip_mm)
-    precip_prob = _float(precip_probability)
+    precip_prob = normalize_probability_fraction(precip_probability, input_unit=precip_probability_unit)
     cloud = _float(cloud_cover_percent)
     wind = _float(wind_speed_ms)
     dew = _float(dew_point_c)
@@ -93,6 +96,7 @@ def weather_code_for_row(row: dict[str, Any]) -> WeatherCodeResult:
         humidity_percent=row.get("humidity_percent", row.get("humidity")),
         precip_mm=row.get("precip_mm", row.get("precipitation", row.get("nwp_tp"))),
         precip_probability=row.get("precip_probability"),
+        precip_probability_unit=str(row.get("precip_probability_unit") or "percent"),
         cloud_cover_percent=row.get("cloud_cover_percent", row.get("cloud_cover", row.get("nwp_cloud_cover"))),
         wind_speed_ms=row.get("wind_speed_ms", row.get("wind_speed", row.get("nwp_wind_speed"))),
         dew_point_c=row.get("dew_point_c", row.get("nwp_dew_point")),

@@ -3,27 +3,113 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>기상 예보 MVP</title>
+  <title>Gisang Forecast</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <main class="app">
-    <section class="banner" id="warning">운영 검증 전 연구/백테스트 기반 예측입니다. 실제 예보로 사용하지 마세요.</section>
-    <header>
-      <h1>한국 날씨 예보 MVP</h1>
-      <p>Forecast API의 <code>forecast_points.json</code>을 표시하는 사이트 MVP입니다.</p>
+  <main class="app-shell" aria-label="Gisang Forecast 전국 미래 예측 지도">
+    <section class="caveat-banner" id="caveatBanner">
+      본 사이트는 AI 기반 기상 예측 모델의 미래 예측값을 지도 형태로 제공하는 연구/베타 서비스입니다. 실제 기상청 예보와 다를 수 있습니다.
+    </section>
+
+    <header class="topbar">
+      <section class="brand-block" aria-label="서비스 소개">
+        <div class="brand-mark" aria-hidden="true">G</div>
+        <div>
+          <p class="eyebrow">Research Beta</p>
+          <h1>Gisang Forecast</h1>
+          <p class="subtitle">AI 기반 전국 미래 날씨 예측 지도</p>
+        </div>
+      </section>
+
+      <section class="time-block" aria-label="예측 기준 시각">
+        <span class="time-label">예측 기준 시각</span>
+        <strong id="issuedAtText">데이터 로딩 중</strong>
+        <span id="modelStatusPill" class="status-pill">Research Beta</span>
+      </section>
+
+      <nav class="selector-block" aria-label="예측 날짜 선택">
+        <span class="selector-title">날짜 선택</span>
+        <div class="day-tabs" id="dateSelector"></div>
+      </nav>
+
+      <nav class="selector-block selector-block-wide" aria-label="예측 변수 선택">
+        <span class="selector-title">변수 선택</span>
+        <div class="metric-tabs" id="variableSelector"></div>
+      </nav>
     </header>
-    <section class="controls">
-      <label>지역/관측소 선택 <select id="stationSelect"></select></label>
-      <span id="modelStatus" class="badge">model status loading</span>
+
+    <section class="workspace">
+      <section class="map-card" aria-label="전국 예측 지도">
+        <div class="legend-card" id="mapLegend"></div>
+        <div class="korea-map" id="forecastMap">
+          <div class="leaflet-map" id="leafletMap" aria-label="OpenStreetMap 기반 대한민국 지도"></div>
+          <img class="korea-map-asset" src="assets/korea_simplified.svg" alt="대한민국 단순 지도" />
+          <div class="map-empty-state" id="mapEmptyState" hidden></div>
+          <div class="marker-layer" id="markerLayer"></div>
+        </div>
+      </section>
+
+      <aside class="side-panel" aria-label="선택 지역 예측 정보">
+        <article class="panel-card region-panel" id="selectedRegionPanel">
+          <h2>선택 지역</h2>
+          <p>예측 데이터를 불러오는 중입니다.</p>
+        </article>
+
+        <article class="panel-card station-warning-card" id="stationWarning" hidden>
+          <h2>지역 상세 데이터 상태</h2>
+          <p id="stationWarningText"></p>
+        </article>
+
+        <article class="panel-card forecast-table-card">
+          <div class="panel-heading">
+            <h2>날짜별 예측표</h2>
+            <span>D+1/D+2/D+3/D+5</span>
+          </div>
+          <table id="forecastTable">
+            <thead>
+              <tr>
+                <th>날짜</th>
+                <th>날씨상태</th>
+                <th>최고기온</th>
+                <th>최저기온</th>
+                <th>습도</th>
+                <th>강수확률</th>
+                <th>바람</th>
+                <th>신뢰도</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </article>
+
+        <article class="panel-card model-panel" id="modelPerformanceSummary">
+          <h2>모델 성능 요약</h2>
+          <p>모델 상태를 불러오는 중입니다.</p>
+        </article>
+
+        <article class="panel-card caveat-notes" id="caveatNotes">
+          <h2>주의사항</h2>
+          <p>습도 예측은 beta입니다.</p>
+          <p>날씨상태는 일부 rule-based 추정을 포함합니다.</p>
+          <p>강수확률은 AI 모델 검증 전에는 KMA/NWP 직접값 또는 준비 중으로 표시됩니다.</p>
+        </article>
+      </aside>
     </section>
-    <section class="grid">
-      <article class="card" id="forecastCard"><h2>예보 카드</h2><p>데이터 로딩 중...</p></article>
-      <article class="card"><h2>24시간 기온</h2><div id="tempChart" class="chart"></div></article>
-      <article class="card"><h2>습도 beta</h2><div id="humidityChart" class="chart"></div></article>
-    </section>
-    <section class="card"><h2>시간대별 예보</h2><table id="hourlyTable"><thead><tr><th>시간</th><th>기온</th><th>습도</th><th>날씨</th><th>신뢰도</th></tr></thead><tbody></tbody></table></section>
   </main>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="data/forecasts/latest/forecast_data.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

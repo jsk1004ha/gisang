@@ -336,6 +336,26 @@ G025 extends the operational benchmark to a 90-cycle medium archive and adds tru
 
 G026 targets the remaining operational gates with a strong real-forecast archive path, full-variable GFS support, target-specific model selection, and stricter humidity ensemble rejection. The operational runner now records overall and split-specific full-variable coverage, writes `production_model_manifest.json` with target artifact types/ensemble artifact paths, and separates temperature patch/ensemble selection from humidity no-patch calibration. Full-variable S3 extraction can be large; if it cannot complete in the local runtime, reports must document the blocker instead of promoting the full-variable path. See `docs/G026_ACCURACY_BREAKTHROUGH.md`. Local strong-core evidence reached temperature RMSE 1.694°C and humidity RMSE 10.396%p, so V4-C/site beta remain WARN/FAIL until further data-variable enrichment improves both gates.
 
+### G027 human-readable operational dashboard
+
+G027 restores the human-readable dashboard quality of the earlier integrated experiment report for operational benchmarks. `weather_korea_forecast.v4.operational_performance` now writes KPI cards, target best-model cards, PASS/WARN/FAIL badges, interpretation text, `operational_performance_summary.csv`, `operational_performance_summary.json`, and `plots/*.png` alongside `operational_performance_report.html`. Use `--embed-images thumbnail` (default), `--embed-images full`, or `--embed-images external-assets` to control plot embedding. The default thumbnail mode embeds a resized PNG preview and links each plot card to the original PNG. See `docs/G027_OPERATIONAL_REPORT_DASHBOARD.md`.
+
+### G028 temperature final improvement
+
+G028 is the bounded final temperature-improvement sprint before production freeze. It adds issue-time/horizon calibration candidates and records an allowlisted strong-archive run plus one recovery rerun. Local evidence did **not** reach the temperature gate: best RMSE remained `1.694°C`, so G030 should freeze temperature with an accuracy caveat instead of continuing open-ended model experiments. See `docs/G028_TEMPERATURE_FINAL_IMPROVEMENT.md`.
+
+### G029 humidity final improvement
+
+G029 is the bounded final humidity-improvement sprint. The no-patch LGBM remains the official humidity baseline by validation selection; the logit-RH candidate passed the test split but was not adopted because its validation holdout RMSE was worse. Final selected humidity is `NEAR_PASS` at `10.396%p` RMSE and `0.596%p` bias, so the site should carry a humidity beta caveat. See `docs/G029_HUMIDITY_FINAL_IMPROVEMENT.md`.
+
+### G030 production freeze and final dashboard
+
+G030 freezes model selection for the site handoff. The frozen artifacts are under `data/artifacts/g030_production_freeze_final/` and include `production_model_manifest.json`, `production_model_freeze_record.json`, `operational_performance_report.html`, `operational_performance_summary.csv`, `operational_performance_summary.json`, and `plots/*.png`. Temperature is frozen with an accuracy caveat at `1.694°C` RMSE; humidity is frozen as beta/NEAR_PASS at `10.396%p` RMSE with `0.596%p` bias. G031 must consume this manifest/schema only and must not add model experiments. See `docs/G030_PRODUCTION_FREEZE.md`.
+
+### G031 website finalization
+
+G031 is site/API/schema-consumption only. The API exposes `/api/forecast/latest`, station hourly/daily forecast endpoints, and `/api/model/status`; the static `web/` MVP includes region/station selection, current forecast summary, temperature/humidity/precipitation charts, daily max/min temperature, hourly forecast table, model reliability badges, humidity beta, and rule-based weather-code warnings. It consumes the frozen `forecast_points.v2-beta-sources` schema and the G030 production manifest without changing model selection. See `docs/SITE_FINALIZATION.md` and `docs/DEPLOYMENT_PLAN.md`.
+
 `data.future_features.column_mapping`은 forecast CSV 컬럼을 학습 feature 이름으로 매핑한다. 예: `era5_t2m: gfs_t2m`, `era5_sp: gfs_sp`, `era5_u10: gfs_u10`, `era5_v10: gfs_v10`, `era5_tp: gfs_tp`. `issue_time`이 있으면 `forecast_init_time` 이하의 최신 run을 선택한다. 운영 추론에서는 미래 weather covariate가 모든 horizon에 없으면 실행을 중단한다.
 
 ### V2 기본 실험 config

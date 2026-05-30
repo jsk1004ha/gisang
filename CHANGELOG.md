@@ -1,3 +1,34 @@
+## G031 - Website Finalization
+
+- Completed the site-only MVP handoff around the frozen G030 manifest and `forecast_points.v2-beta-sources` schema.
+- Added manifest-aware model status output for temperature/humidity metrics, benchmark reliability, site readiness, beta labels, caveats, operational validity, and frozen model-selection status.
+- Expanded the static web UI with region/station selection, daily max/min summary, model status card, reliability badges, humidity beta, and rule-based weather-code warnings.
+- Documented the final site and deployment plan while preserving the G030 no-more-model-improvement rule.
+
+## G030 - Production Freeze + Final Report
+
+- Froze target-specific model selection for the site handoff: temperature uses `ensemble_stationwise_inverse_rmse` with an accuracy caveat, humidity uses no-patch `operational_residual_lgbm_humidity` as beta, and weather code remains `rule_based_beta`.
+- Generated final production freeze artifacts under `data/artifacts/g030_production_freeze_final/`, including `production_model_manifest.json`, `production_model_freeze_record.json`, the dashboard HTML report, summary CSV/JSON, and required plot PNGs.
+- Added manifest status/caveat fields, `forecast_points.v2-beta-sources` schema binding, non-self-referential freeze checksums, and report badges for `FAIL`, `NEAR_PASS`, `WARN`, and `PASS`.
+
+## G029 - Humidity Final Improvement
+
+- Ran the bounded humidity allowlist with no-patch LGBM calibration, logit-RH residual LightGBM, quantile/isotonic calibration candidates, and validation-only final selection.
+- Preserved the no-patch LGBM as the official humidity baseline because it had the best validation holdout RMSE, even though the logit-RH candidate happened to pass on the test split.
+- Recorded G029 as `NEAR_PASS`: final selected humidity RMSE is `10.396%p` with `0.596%p` bias, so G030/G031 should carry a humidity beta caveat.
+
+## G028 - Temperature Final Improvement
+
+- Added issue-time/horizon calibration candidates for operational MOS bias correction and covered them with regression tests.
+- Ran the bounded G028 temperature allowlist on the strong 182-cycle real-forecast archive, including a full-grid calibration attempt and one final-ensemble recovery rerun.
+- Recorded G028 as `FAIL` after the allowed recovery: best temperature RMSE remained `1.694°C`, above both the `1.5°C` PASS gate and `1.6°C` NEAR_PASS gate, so G030 should freeze temperature with an accuracy caveat rather than continuing open-ended model work.
+
+## G027 - Human-readable Operational Report Dashboard
+
+- Reworked `operational_performance_report.html` into a dashboard-style operational benchmark report with KPI cards, temp/humidity best-model cards, PASS/WARN/FAIL badges, gate/readiness cards, interpretation text, target-specific units, and ordered overview/baseline/analysis/gate/table sections.
+- Added operational dashboard plot generation under `plots/` for forecast-vs-actual, scatter, residual, horizon, station/region, heatmap, patch ablation, calibration, ensemble/model comparison, and humidity dry/humid event views.
+- Added `--embed-images {thumbnail,full,external-assets}` for the operational report, defaulting to thumbnail embeds that link to the original PNG, plus `operational_performance_summary.csv` and `operational_performance_summary.json` outputs.
+
 ## G026 - Accuracy Breakthrough Sprint
 
 - Added full-variable GFS schema support for station-nearest and true-grid patch extraction, including gust, cloud, radiation, soil temperature, land/sea mask, specific humidity, precipitable water, precipitation rate, and mean sea-level pressure.

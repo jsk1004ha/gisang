@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import html
+import hashlib
 import json
 import pickle
 from dataclasses import dataclass
@@ -17,7 +17,15 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from weather_korea_forecast.v4.beta_targets import build_beta_targets_summary
 from weather_korea_forecast.v4.gfs_grid_patch import PATCH_FEATURE_MODE
+from weather_korea_forecast.v4.operational_metadata import FORECAST_POINTS_SCHEMA_VERSION, TARGETS, TARGET_BIAS_GATE, TARGET_GATE_RMSE, TARGET_NEAR_PASS_RMSE
+from weather_korea_forecast.v4.operational_report import (
+    EMBED_IMAGE_MODES,
+    write_operational_dashboard_plots,
+    write_operational_performance_html,
+    write_operational_performance_summary_artifacts,
+)
 
 try:  # pragma: no cover - dependency is present in normal dev env, optional in minimal envs.
     from lightgbm import LGBMRegressor
@@ -29,10 +37,6 @@ try:  # pragma: no cover - optional dependency.
 except Exception:  # noqa: BLE001
     CatBoostRegressor = None  # type: ignore[assignment]
 
-TARGETS = {
-    "temp": {"actual": "temp", "baseline": "nwp_t2m", "official_raw": "raw_gfs_t2m", "official_lgbm": "operational_residual_lgbm_temp"},
-    "humidity": {"actual": "humidity", "baseline": "nwp_humidity", "official_raw": "raw_gfs_rh", "official_lgbm": "operational_residual_lgbm_humidity"},
-}
 BASE_FEATURES = [
     "horizon_step",
     "nwp_t2m",
@@ -116,6 +120,9 @@ CALIBRATION_CANDIDATES = [
     "per_horizon_mean_bias",
     "per_station_horizon_mean_bias",
     "per_region_horizon_mean_bias",
+    "per_issue_hour_horizon_mean_bias",
+    "per_station_issue_hour_horizon_mean_bias",
+    "per_region_issue_hour_horizon_mean_bias",
     "global_affine",
     "per_station_horizon_affine",
     "per_region_horizon_affine",
@@ -192,6 +199,36 @@ class CalibrationModel:
                 horizon = int(getattr(row, "horizon_step"))
                 key = f"{region}|{horizon}"
                 adjustments[i] = float(groups.get(key, horizon_groups.get(str(horizon), global_bias)))
+        elif self.name == "per_issue_hour_horizon_mean_bias":
+            horizon_groups = self.payload.get("horizon_groups", {}) or {}
+            issue_time = pd.to_datetime(frame["issue_time"], utc=True, errors="coerce")
+            for i, row in enumerate(frame[["horizon_step"]].itertuples(index=False)):
+                hour = issue_time.iloc[i].hour if pd.notna(issue_time.iloc[i]) else "unknown"
+                horizon = int(row.horizon_step)
+                key = f"{hour}|{horizon}"
+                adjustments[i] = float(groups.get(key, horizon_groups.get(str(horizon), global_bias)))
+        elif self.name == "per_station_issue_hour_horizon_mean_bias":
+            station_horizon_groups = self.payload.get("station_horizon_groups", {}) or {}
+            horizon_groups = self.payload.get("horizon_groups", {}) or {}
+            issue_time = pd.to_datetime(frame["issue_time"], utc=True, errors="coerce")
+            for i, row in enumerate(frame[["station_id", "horizon_step"]].itertuples(index=False)):
+                hour = issue_time.iloc[i].hour if pd.notna(issue_time.iloc[i]) else "unknown"
+                horizon = int(row.horizon_step)
+                key = f"{row.station_id}|{hour}|{horizon}"
+                station_horizon_key = f"{row.station_id}|{horizon}"
+                adjustments[i] = float(groups.get(key, station_horizon_groups.get(station_horizon_key, horizon_groups.get(str(horizon), global_bias))))
+        elif self.name == "per_region_issue_hour_horizon_mean_bias":
+            region_col = self.payload.get("region_column")
+            region_horizon_groups = self.payload.get("region_horizon_groups", {}) or {}
+            horizon_groups = self.payload.get("horizon_groups", {}) or {}
+            issue_time = pd.to_datetime(frame["issue_time"], utc=True, errors="coerce")
+            for i, row in enumerate(frame.itertuples(index=False)):
+                region = getattr(row, str(region_col), None) if region_col else None
+                hour = issue_time.iloc[i].hour if pd.notna(issue_time.iloc[i]) else "unknown"
+                horizon = int(getattr(row, "horizon_step"))
+                key = f"{region}|{hour}|{horizon}"
+                region_horizon_key = f"{region}|{horizon}"
+                adjustments[i] = float(groups.get(key, region_horizon_groups.get(region_horizon_key, horizon_groups.get(str(horizon), global_bias))))
         elif self.name == "per_station_month_hour_mean_bias":
             station_groups = self.payload.get("station_groups", {}) or {}
             for i, row in enumerate(frame.itertuples(index=False)):
@@ -426,11 +463,11 @@ def evaluate_v4c_gate(summary: dict[str, Any]) -> dict[str, Any]:
     reliability = str(summary.get("benchmark_reliability") or "smoke")
     conditions = {
         "operational_valid=true temp model exists": temp_lgbm.get("rmse") is not None,
-        "temp_rmse <= 1.5": temp_lgbm.get("rmse") is not None and float(temp_lgbm["rmse"]) <= 1.5,
-        "humidity_rmse <= 10": humidity_lgbm.get("rmse") is not None and float(humidity_lgbm["rmse"]) <= 10.0,
+        "temp_rmse <= 1.5": temp_lgbm.get("rmse") is not None and float(temp_lgbm["rmse"]) <= TARGET_GATE_RMSE["temp"],
+        "humidity_rmse <= 10": humidity_lgbm.get("rmse") is not None and float(humidity_lgbm["rmse"]) <= TARGET_GATE_RMSE["humidity"],
         "benchmark_reliability >= medium": reliability in {"medium", "strong", "seasonal"},
         "patch_ablation_completed": bool(summary.get("patch_ablation_completed")),
-        "report_generated": bool(summary.get("artifacts", {}).get("html_report") if isinstance(summary.get("artifacts"), dict) else False),
+        "report_generated": _is_report_generated(summary),
     }
     missing = [name for name, ok in conditions.items() if not ok]
     return {"status": "PASS" if not missing else "FAIL", "conditions": conditions, "missing_conditions": missing}
@@ -446,30 +483,130 @@ def evaluate_site_readiness_gate(summary: dict[str, Any]) -> dict[str, Any]:
     reliability = str(summary.get("benchmark_reliability") or "smoke")
     conditions = {
         "temp operational_valid=true": temp_lgbm.get("rmse") is not None,
-        "temp RMSE <= 1.5": temp_lgbm.get("rmse") is not None and float(temp_lgbm["rmse"]) <= 1.5,
-        "humidity RMSE <= 10 beta": humidity_lgbm.get("rmse") is not None and float(humidity_lgbm["rmse"]) <= 10.0,
+        "temp RMSE <= 1.5": temp_lgbm.get("rmse") is not None and float(temp_lgbm["rmse"]) <= TARGET_GATE_RMSE["temp"],
+        "humidity RMSE <= 10 beta": humidity_lgbm.get("rmse") is not None and float(humidity_lgbm["rmse"]) <= TARGET_GATE_RMSE["humidity"],
         "benchmark_reliability >= medium": reliability in {"medium", "strong", "seasonal"},
         "patch_ablation_completed": bool(summary.get("patch_ablation_completed")),
-        "report_generated": bool(summary.get("artifacts", {}).get("html_report")) if isinstance(summary.get("artifacts"), dict) else False,
+        "report_generated": _is_report_generated(summary),
         "weather_code rule-based allowed": True,
     }
     missing = [name for name, ok in conditions.items() if not ok]
     return {"status": "PASS" if not missing else "WARN", "conditions": conditions, "missing_conditions": missing}
 
 
+def _is_report_generated(summary: dict[str, Any]) -> bool:
+    artifacts = summary.get("artifacts", {}) if isinstance(summary.get("artifacts"), dict) else {}
+    html_report = artifacts.get("html_report")
+    explicit = bool(summary.get("report_generated"))
+    return bool(explicit and html_report and Path(str(html_report)).exists())
+
+
+def classify_target_status(target: str, metrics: dict[str, Any]) -> str:
+    rmse = metrics.get("rmse") if isinstance(metrics, dict) else None
+    if rmse is None:
+        return "FAIL"
+    value = float(rmse)
+    if value <= TARGET_GATE_RMSE[target]:
+        return "PASS"
+    if value <= TARGET_NEAR_PASS_RMSE[target]:
+        return "NEAR_PASS"
+    return "FAIL"
+
+
+def classify_humidity_bias_status(metrics: dict[str, Any]) -> str:
+    bias = metrics.get("bias") if isinstance(metrics, dict) else None
+    if bias is None:
+        return "WARN"
+    return "PASS" if abs(float(bias)) <= TARGET_BIAS_GATE["humidity"] else "FAIL"
+
+
+def _site_caveats(
+    *,
+    temperature_status: str,
+    humidity_status: str,
+    humidity_bias_status: str,
+    benchmark_reliability: Any,
+    site_readiness_status: Any,
+    v4c_gate_status: Any,
+) -> list[str]:
+    caveats: list[str] = []
+    if temperature_status != "PASS":
+        caveats.append("temperature_accuracy_caveat")
+    if humidity_status != "PASS":
+        caveats.append("humidity_beta")
+    if humidity_bias_status != "PASS":
+        caveats.append("humidity_bias_caveat")
+    if str(benchmark_reliability) not in {"medium", "strong", "seasonal"}:
+        caveats.append("benchmark_reliability_low")
+    if str(site_readiness_status) != "PASS":
+        caveats.append("site_readiness_not_pass")
+    if str(v4c_gate_status) != "PASS":
+        caveats.append("v4c_gate_not_pass")
+    caveats.append("weather_code_rule_based_beta")
+    return caveats
+
+
 def build_production_model_manifest(summary: dict[str, Any]) -> dict[str, Any]:
     best = summary.get("best_operational_models", {}) if isinstance(summary.get("best_operational_models"), dict) else {}
     temp = best.get("temp", {}) if isinstance(best.get("temp"), dict) else {}
     humidity = best.get("humidity", {}) if isinstance(best.get("humidity"), dict) else {}
+    beta_targets = summary.get("beta_targets", {}) if isinstance(summary.get("beta_targets"), dict) else {}
     site = summary.get("site_readiness", {}) if isinstance(summary.get("site_readiness"), dict) else evaluate_site_readiness_gate(summary)
     v4c = summary.get("v4c_gate", {}) if isinstance(summary.get("v4c_gate"), dict) else evaluate_v4c_gate(summary)
     temp_artifact = _target_model_artifact_summary("temp", temp, summary)
     humidity_artifact = _target_model_artifact_summary("humidity", humidity, summary)
+    precip_descriptor = _beta_descriptor(beta_targets, "precip_probability")
+    wind_descriptor = _beta_descriptor(beta_targets, "wind")
+    cloud_descriptor = _beta_descriptor(beta_targets, "cloud")
+    weather_descriptor = _beta_descriptor(beta_targets, "weather_code")
+    temperature_status = classify_target_status("temp", temp)
+    humidity_status = classify_target_status("humidity", humidity)
+    humidity_bias_status = classify_humidity_bias_status(humidity)
+    benchmark_reliability = summary.get("benchmark_reliability")
+    site_readiness_status = site.get("status")
+    v4c_gate_status = v4c.get("status")
+    operational_valid = bool(
+        temp.get("model")
+        and humidity.get("model")
+        and temperature_status == "PASS"
+        and humidity_status == "PASS"
+        and humidity_bias_status == "PASS"
+        and benchmark_reliability in {"medium", "strong", "seasonal"}
+        and str(site_readiness_status) == "PASS"
+        and str(v4c_gate_status) == "PASS"
+        and _is_report_generated(summary)
+    )
+    beta_label_required = {
+        "temperature": temperature_status != "PASS",
+        "humidity": humidity_status != "PASS" or humidity_bias_status != "PASS",
+        "weather_code": str(weather_descriptor.get("status") or "beta").lower() != "direct",
+    }
+    site_caveats = _site_caveats(
+        temperature_status=temperature_status,
+        humidity_status=humidity_status,
+        humidity_bias_status=humidity_bias_status,
+        benchmark_reliability=benchmark_reliability,
+        site_readiness_status=site_readiness_status,
+        v4c_gate_status=v4c_gate_status,
+    )
     return {
         "temp_model_artifact": temp_artifact["primary_artifact"],
         "humidity_model_artifact": humidity_artifact["primary_artifact"],
         "temp_model": temp.get("model"),
         "humidity_model": humidity.get("model"),
+        "temperature_model": temp.get("model") or "existing_temp_mos",
+        "temperature_status": temperature_status,
+        "temp_status": temperature_status,
+        "humidity_status": humidity_status,
+        "humidity_bias_status": humidity_bias_status,
+        "site_caveats": site_caveats,
+        "beta_label_required": beta_label_required,
+        "forecast_schema_version": FORECAST_POINTS_SCHEMA_VERSION,
+        "precip_probability_model": precip_descriptor.get("model_key") or precip_descriptor.get("source") or "unavailable",
+        "wind_model": wind_descriptor.get("model_key") or wind_descriptor.get("source") or "unavailable",
+        "cloud_model": cloud_descriptor.get("model_key") or cloud_descriptor.get("source") or "unavailable",
+        "weather_code_model": weather_descriptor.get("model_key") or "rule_based_beta",
+        "beta_targets": beta_targets,
         "temp_artifact_type": temp_artifact["artifact_type"],
         "humidity_artifact_type": humidity_artifact["artifact_type"],
         "temp_selected_model_key": temp_artifact["selected_model_key"],
@@ -477,17 +614,78 @@ def build_production_model_manifest(summary: dict[str, Any]) -> dict[str, Any]:
         "temp_artifacts": temp_artifact,
         "humidity_artifacts": humidity_artifact,
         "temp_rmse": temp.get("rmse"),
+        "temperature_rmse": temp.get("rmse"),
         "humidity_rmse": humidity.get("rmse"),
         "temp_mae": temp.get("mae"),
+        "temperature_mae": temp.get("mae"),
         "humidity_mae": humidity.get("mae"),
         "temp_bias": temp.get("bias"),
+        "temperature_bias": temp.get("bias"),
         "humidity_bias": humidity.get("bias"),
-        "benchmark_reliability": summary.get("benchmark_reliability"),
-        "site_readiness_status": site.get("status"),
-        "v4c_gate_status": v4c.get("status"),
+        "benchmark_reliability": benchmark_reliability,
+        "site_readiness_status": site_readiness_status,
+        "site_readiness": site_readiness_status,
+        "v4c_gate_status": v4c_gate_status,
+        "operational_valid": operational_valid,
         "operational_beta_allowed": site.get("status") == "PASS",
         "target_specific_models": True,
+        "model_improvement_frozen": bool(summary.get("model_improvement_frozen", False)),
     }
+
+
+def _sha256_file(path: str | Path) -> str | None:
+    candidate = Path(path)
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    digest = hashlib.sha256()
+    with candidate.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _canonical_manifest_sha256(manifest: dict[str, Any]) -> str:
+    payload = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_json_default).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def build_production_model_freeze_record(summary: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    artifacts = summary.get("artifacts", {}) if isinstance(summary.get("artifacts"), dict) else {}
+    model_paths = {
+        "temperature": manifest.get("temp_model_artifact"),
+        "humidity": manifest.get("humidity_model_artifact"),
+        "component_models": artifacts.get("models"),
+    }
+    model_hashes = {name: {"path": path, "sha256": _sha256_file(path)} for name, path in model_paths.items() if path}
+    benchmark_summary_path = (
+        artifacts.get("source_benchmark_summary_json")
+        or artifacts.get("benchmark_source_summary_json")
+        or artifacts.get("summary_json")
+    )
+    benchmark_summary_sha256 = _sha256_file(benchmark_summary_path) if benchmark_summary_path else None
+    if benchmark_summary_path and benchmark_summary_sha256 is None:
+        raise FileNotFoundError(f"freeze record benchmark summary artifact is missing: {benchmark_summary_path}")
+    return {
+        "manifest_sha256": _canonical_manifest_sha256(manifest),
+        "manifest_hash_convention": "sha256 over canonical JSON bytes of production_model_manifest.json content; checksum is stored only in this freeze record",
+        "benchmark_summary_path": benchmark_summary_path,
+        "benchmark_summary_sha256": benchmark_summary_sha256,
+        "model_artifact_sha256": model_hashes,
+        "forecast_schema_version": manifest.get("forecast_schema_version", FORECAST_POINTS_SCHEMA_VERSION),
+        "frozen_at": pd.Timestamp.utcnow().isoformat(),
+        "allowed_post_freeze_change_scopes": ["web", "api", "docs", "schema_consumption"],
+        "forbidden_post_freeze_change_scopes": ["training", "model_selection", "experiment_candidates"],
+        "temperature_status": manifest.get("temperature_status"),
+        "humidity_status": manifest.get("humidity_status"),
+        "humidity_bias_status": manifest.get("humidity_bias_status"),
+        "site_caveats": manifest.get("site_caveats", []),
+    }
+
+
+def _beta_descriptor(beta_targets: dict[str, Any], target: str) -> dict[str, Any]:
+    target_payload = beta_targets.get(target, {}) if isinstance(beta_targets.get(target), dict) else {}
+    descriptor = target_payload.get("descriptor", target_payload) if isinstance(target_payload, dict) else {}
+    return descriptor if isinstance(descriptor, dict) else {}
 
 
 def _target_model_artifact_summary(target: str, metrics: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
@@ -518,36 +716,6 @@ def _target_model_artifact_summary(target: str, metrics: dict[str, Any], summary
     return output
 
 
-def write_operational_performance_html(summary: dict[str, Any], output_path: str | Path) -> Path:
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    snapshot = output.parent / "summary_snapshot.json"
-    snapshot.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
-    rows = [
-        "<!doctype html><html><head><meta charset='utf-8'>",
-        "<title>Operational Performance Report</title>",
-        "<style>body{font-family:Inter,Segoe UI,Arial,sans-serif;margin:32px;background:#f8fafc;color:#0f172a}table{border-collapse:collapse;width:100%;background:white;margin:16px 0}th,td{border:1px solid #cbd5e1;padding:8px;text-align:left}th{background:#e2e8f0}.card{background:white;border:1px solid #cbd5e1;border-radius:12px;padding:16px;margin:16px 0}.pass{color:#15803d;font-weight:700}.fail{color:#b91c1c;font-weight:700}.warn{color:#b45309;font-weight:700}code{background:#e2e8f0;padding:1px 4px;border-radius:4px}</style>",
-        "</head><body>",
-        "<h1>Operational Performance Report</h1>",
-        f"<div class='card'><b>benchmark_reliability:</b> <code>{html.escape(str(summary.get('benchmark_reliability')))}</code></div>",
-        _html_metric_table(summary.get("official_baselines", {})),
-        _html_gate("V4-C Gate", summary.get("v4c_gate", {})),
-        _html_gate("Site Readiness", summary.get("site_readiness", {})),
-        _html_section("Calibration", summary.get("calibration", {})),
-        _html_section("Patch Ablation", summary.get("patch_ablation", {})),
-        _html_section("Patch Improvement", summary.get("patch_improvement", {})),
-        _html_section("Variable Coverage", summary.get("variable_coverage", {})),
-        _html_section("Ensembles", summary.get("ensembles", {})),
-        _html_section("CatBoost", summary.get("catboost", {})),
-        _html_section("Production Model Manifest", summary.get("production_model_manifest", {})),
-        _html_section("Ridge Residual Debug", summary.get("ridge_debug", {})),
-        _html_section("Artifacts", summary.get("artifacts", {})),
-        "</body></html>",
-    ]
-    output.write_text("\n".join(rows), encoding="utf-8")
-    return output
-
-
 def run_operational_benchmark(
     *,
     nwp_archive: str | Path,
@@ -557,6 +725,7 @@ def run_operational_benchmark(
     output_dir: str | Path,
     lgbm_grid: list[dict[str, Any]] | None = None,
     grid_patch_features: str | Path | None = None,
+    embed_images: str = "thumbnail",
 ) -> dict[str, Any]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -569,7 +738,19 @@ def run_operational_benchmark(
     benchmark = _benchmark_info(frame)
     variable_coverage = summarize_variable_coverage(frame)
     models: dict[str, Any] = {}
-    predictions = frame.loc[frame["split"].eq("test"), ["station_id", "issue_time", "valid_time", "horizon_step", "temp", "humidity", "nwp_t2m", "nwp_humidity"]].copy()
+    prediction_columns = [
+        "station_id",
+        "region",
+        "region_class",
+        "issue_time",
+        "valid_time",
+        "horizon_step",
+        "temp",
+        "humidity",
+        "nwp_t2m",
+        "nwp_humidity",
+    ]
+    predictions = frame.loc[frame["split"].eq("test"), [column for column in prediction_columns if column in frame.columns]].copy()
     summary: dict[str, Any] = {
         "data": {
             "nwp_archive": str(nwp_archive),
@@ -597,8 +778,10 @@ def run_operational_benchmark(
         "catboost": {},
         "ensembles": {},
         "best_operational_models": {},
+        "beta_targets": build_beta_targets_summary(frame),
         "ridge_debug": {},
         "artifacts": {},
+        "report_generated": False,
     }
     grid = lgbm_grid or DEFAULT_LGBM_GRID
     pd.DataFrame(variable_coverage.get("variables", [])).to_csv(output / "variable_coverage.csv", index=False)
@@ -778,21 +961,42 @@ def run_operational_benchmark(
         pickle.dump(models, handle)
     summary["artifacts"] = {
         "summary_json": str(output / "experiment_summary.json"),
+        "operational_summary_json": str(output / "operational_performance_summary.json"),
+        "operational_summary_csv": str(output / "operational_performance_summary.csv"),
         "html_report": str(output / "operational_performance_report.html"),
         "predictions_test": str(output / "predictions_test.csv"),
         "joined_training_frame": str(output / "joined_training_frame.csv"),
         "models": str(output / "models.pkl"),
         "variable_coverage": str(output / "variable_coverage.csv"),
+        "plots_dir": str(output / "plots"),
     }
     summary["v4c_gate"] = evaluate_v4c_gate(summary)
     summary["site_readiness"] = evaluate_site_readiness_gate(summary)
     manifest_path = output / "production_model_manifest.json"
+    summary["artifacts"]["production_model_manifest"] = str(manifest_path)
+    plot_paths = write_operational_dashboard_plots(summary, predictions, output / "plots")
+    summary["plots"] = {path.name: str(path) for path in plot_paths}
+    summary["report_generated"] = True
+    summary["v4c_gate"] = evaluate_v4c_gate(summary)
+    summary["site_readiness"] = evaluate_site_readiness_gate(summary)
+    write_operational_performance_html(summary, output / "operational_performance_report.html", embed_images=embed_images)
+    summary["report_generated"] = (output / "operational_performance_report.html").exists()
+    summary["v4c_gate"] = evaluate_v4c_gate(summary)
+    summary["site_readiness"] = evaluate_site_readiness_gate(summary)
+    source_benchmark_summary_path = output / "source_benchmark_summary.json"
+    summary["artifacts"]["source_benchmark_summary_json"] = str(source_benchmark_summary_path)
+    source_benchmark_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
     manifest = build_production_model_manifest(summary)
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
     summary["production_model_manifest"] = manifest
-    summary["artifacts"]["production_model_manifest"] = str(manifest_path)
+    freeze_record_path = output / "production_model_freeze_record.json"
+    freeze_record = build_production_model_freeze_record(summary, manifest)
+    freeze_record_path.write_text(json.dumps(freeze_record, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+    summary["artifacts"]["production_model_freeze_record"] = str(freeze_record_path)
+    summary["production_model_freeze_record"] = freeze_record
+    write_operational_performance_html(summary, output / "operational_performance_report.html", embed_images=embed_images)
+    write_operational_performance_summary_artifacts(summary, output)
     (output / "experiment_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
-    write_operational_performance_html(summary, output / "operational_performance_report.html")
     _write_markdown_report(summary, output / "operational_performance_report.md")
     return summary
 
@@ -810,6 +1014,7 @@ def load_joined_operational_frame(*, nwp_archive: str | Path, observations: str 
     obs["station_id"] = obs["station_id"].astype(str)
     obs["obs_time_kst"] = pd.to_datetime(obs["datetime"], errors="coerce")
     obs["valid_time"] = obs["obs_time_kst"].dt.tz_localize("Asia/Seoul").dt.tz_convert("UTC")
+    _normalize_optional_observation_labels(obs)
     for column in ["temp", "humidity", "pressure", "wind_speed", "precipitation"]:
         if column in obs.columns:
             obs[column] = pd.to_numeric(obs[column], errors="coerce")
@@ -817,12 +1022,44 @@ def load_joined_operational_frame(*, nwp_archive: str | Path, observations: str 
         obs["precipitation"] = obs["precipitation"].fillna(0.0)
     stations = pd.read_csv(station_metadata, dtype={"station_id": str})
     keep_station_cols = [column for column in ["station_id", "lat", "lon", "elevation", "region", "region_class", "coastal_distance_km"] if column in stations.columns]
-    frame = nwp.merge(obs[["station_id", "valid_time", "temp", "humidity", "pressure", "wind_speed", "precipitation"]], on=["station_id", "valid_time"], how="inner")
+    obs_columns = [
+        column
+        for column in [
+            "station_id",
+            "valid_time",
+            "temp",
+            "humidity",
+            "pressure",
+            "wind_speed",
+            "precipitation",
+            "wind_direction",
+            "cloud_class",
+            "sky_code",
+            "cloud_label",
+        ]
+        if column in obs.columns
+    ]
+    frame = nwp.merge(obs[obs_columns], on=["station_id", "valid_time"], how="inner")
     frame = frame.merge(stations[keep_station_cols], on="station_id", how="left")
     frame = pd.concat([frame, _cyc_features(frame["issue_time"], "issue"), _cyc_features(frame["valid_time"], "valid")], axis=1)
     _add_operational_derived_features(frame)
     frame = frame.dropna(subset=["temp", "humidity", "nwp_t2m", "nwp_humidity"]).sort_values(["issue_time", "station_id", "horizon_step"]).reset_index(drop=True)
     return frame
+
+
+def _normalize_optional_observation_labels(obs: pd.DataFrame) -> None:
+    if "wind_direction" not in obs.columns:
+        for alias in ["wind_direction_deg", "wind_dir", "wd"]:
+            if alias in obs.columns:
+                obs["wind_direction"] = obs[alias]
+                break
+    if "wind_direction" in obs.columns:
+        obs["wind_direction"] = pd.to_numeric(obs["wind_direction"], errors="coerce") % 360.0
+    if "sky_code" not in obs.columns:
+        for alias in ["sky", "cloud_code"]:
+            if alias in obs.columns:
+                obs["sky_code"] = obs[alias]
+                break
 
 
 def _normalize_nwp_columns_inplace(frame: pd.DataFrame) -> None:
@@ -832,6 +1069,11 @@ def _normalize_nwp_columns_inplace(frame: pd.DataFrame) -> None:
         "nwp_dew_point": ["nwp_dew_point_2m_c", "gfs_dew_point_2m_c"],
         "nwp_sp": ["nwp_surface_pressure", "gfs_surface_pressure"],
         "nwp_tp": ["nwp_total_precipitation", "gfs_total_precipitation"],
+        "nwp_precip_probability": ["kma_precip_probability", "precip_probability", "pop"],
+        "nwp_u10": ["gfs_u10"],
+        "nwp_v10": ["gfs_v10"],
+        "nwp_wind_direction": ["gfs_wind_direction", "wind_direction_deg"],
+        "nwp_cloud_cover": ["gfs_cloud_cover", "gfs_total_cloud_cover", "total_cloud_cover", "tcc"],
     }
     for canonical, aliases in alias_pairs.items():
         if canonical not in frame.columns:
@@ -1026,6 +1268,67 @@ def _fit_calibration_model(frame: pd.DataFrame, *, actual_column: str, predictio
         groups = residual.groupby(key).mean().to_dict()
         horizon_groups = residual.groupby(frame["horizon_step"].astype(int).astype(str)).mean().to_dict()
         return CalibrationModel(name=name, payload={"global_bias": global_bias, "groups": {str(k): float(v) for k, v in groups.items()}, "horizon_groups": {str(k): float(v) for k, v in horizon_groups.items()}, "region_column": region_col}, actual_column=actual_column, prediction_column=prediction_column)
+    if name == "per_issue_hour_horizon_mean_bias":
+        if "issue_time" not in frame.columns:
+            return _fit_calibration_model(frame, actual_column=actual_column, prediction_column=prediction_column, name="per_horizon_mean_bias")
+        issue_hour = pd.to_datetime(frame["issue_time"], utc=True, errors="coerce").dt.hour.astype("Int64").astype(str)
+        key = issue_hour + "|" + frame["horizon_step"].astype(int).astype(str)
+        groups = residual.groupby(key).mean().to_dict()
+        horizon_groups = residual.groupby(frame["horizon_step"].astype(int).astype(str)).mean().to_dict()
+        return CalibrationModel(
+            name=name,
+            payload={
+                "global_bias": global_bias,
+                "groups": {str(k): float(v) for k, v in groups.items()},
+                "horizon_groups": {str(k): float(v) for k, v in horizon_groups.items()},
+            },
+            actual_column=actual_column,
+            prediction_column=prediction_column,
+        )
+    if name == "per_station_issue_hour_horizon_mean_bias":
+        if "issue_time" not in frame.columns:
+            return _fit_calibration_model(frame, actual_column=actual_column, prediction_column=prediction_column, name="per_station_horizon_mean_bias")
+        issue_hour = pd.to_datetime(frame["issue_time"], utc=True, errors="coerce").dt.hour.astype("Int64").astype(str)
+        station_horizon_key = frame["station_id"].astype(str) + "|" + frame["horizon_step"].astype(int).astype(str)
+        key = frame["station_id"].astype(str) + "|" + issue_hour + "|" + frame["horizon_step"].astype(int).astype(str)
+        groups = residual.groupby(key).mean().to_dict()
+        station_horizon_groups = residual.groupby(station_horizon_key).mean().to_dict()
+        horizon_groups = residual.groupby(frame["horizon_step"].astype(int).astype(str)).mean().to_dict()
+        return CalibrationModel(
+            name=name,
+            payload={
+                "global_bias": global_bias,
+                "groups": {str(k): float(v) for k, v in groups.items()},
+                "station_horizon_groups": {str(k): float(v) for k, v in station_horizon_groups.items()},
+                "horizon_groups": {str(k): float(v) for k, v in horizon_groups.items()},
+            },
+            actual_column=actual_column,
+            prediction_column=prediction_column,
+        )
+    if name == "per_region_issue_hour_horizon_mean_bias":
+        if "issue_time" not in frame.columns:
+            return _fit_calibration_model(frame, actual_column=actual_column, prediction_column=prediction_column, name="per_region_horizon_mean_bias")
+        region_col = "region_class" if "region_class" in frame.columns else "region" if "region" in frame.columns else None
+        if region_col is None:
+            return _fit_calibration_model(frame, actual_column=actual_column, prediction_column=prediction_column, name="per_issue_hour_horizon_mean_bias")
+        issue_hour = pd.to_datetime(frame["issue_time"], utc=True, errors="coerce").dt.hour.astype("Int64").astype(str)
+        region_horizon_key = frame[region_col].astype(str) + "|" + frame["horizon_step"].astype(int).astype(str)
+        key = frame[region_col].astype(str) + "|" + issue_hour + "|" + frame["horizon_step"].astype(int).astype(str)
+        groups = residual.groupby(key).mean().to_dict()
+        region_horizon_groups = residual.groupby(region_horizon_key).mean().to_dict()
+        horizon_groups = residual.groupby(frame["horizon_step"].astype(int).astype(str)).mean().to_dict()
+        return CalibrationModel(
+            name=name,
+            payload={
+                "global_bias": global_bias,
+                "groups": {str(k): float(v) for k, v in groups.items()},
+                "region_horizon_groups": {str(k): float(v) for k, v in region_horizon_groups.items()},
+                "horizon_groups": {str(k): float(v) for k, v in horizon_groups.items()},
+                "region_column": region_col,
+            },
+            actual_column=actual_column,
+            prediction_column=prediction_column,
+        )
     if name == "global_affine":
         slope, intercept = _fit_affine(prediction.to_numpy(), actual.to_numpy())
         return CalibrationModel(name=name, payload={"global": {"slope": slope, "intercept": intercept}}, actual_column=actual_column, prediction_column=prediction_column)
@@ -1583,38 +1886,6 @@ def _write_markdown_report(summary: dict[str, Any], path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _html_metric_table(baselines: Any) -> str:
-    if not isinstance(baselines, dict):
-        return "<div class='card'>No baselines.</div>"
-    rows = ["<h2>Official Baselines</h2><table><tr><th>Target</th><th>Model</th><th>RMSE</th><th>MAE</th><th>Bias</th><th>Notes</th></tr>"]
-    for target, models in baselines.items():
-        if not isinstance(models, dict):
-            continue
-        for model, metrics in models.items():
-            metrics = metrics if isinstance(metrics, dict) else {}
-            rows.append(
-                "<tr>"
-                f"<td>{html.escape(str(target))}</td><td><code>{html.escape(str(model))}</code></td>"
-                f"<td>{_fmt(metrics.get('rmse'))}</td><td>{_fmt(metrics.get('mae'))}</td><td>{_fmt(metrics.get('bias'))}</td>"
-                f"<td>{html.escape(str({k: v for k, v in metrics.items() if k not in {'rmse', 'mae', 'bias', 'n'}}))}</td>"
-                "</tr>"
-            )
-    rows.append("</table>")
-    return "\n".join(rows)
-
-
-def _html_gate(title: str, gate: Any) -> str:
-    gate = gate if isinstance(gate, dict) else {}
-    status = str(gate.get("status", "n/a"))
-    css = "pass" if status == "PASS" else "fail" if status == "FAIL" else "warn"
-    missing = gate.get("missing_conditions", [])
-    return f"<div class='card'><h2>{html.escape(title)}</h2><p>Status: <span class='{css}'>{html.escape(status)}</span></p><p>Missing: {html.escape(str(missing))}</p></div>"
-
-
-def _html_section(title: str, payload: Any) -> str:
-    return f"<div class='card'><h2>{html.escape(title)}</h2><pre>{html.escape(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))}</pre></div>"
-
-
 def _fmt(value: Any) -> str:
     try:
         if value is None:
@@ -1642,6 +1913,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--station-metadata", required=True)
     parser.add_argument("--grid-patch-features", help="Optional true GFS grid patch feature CSV from weather_korea_forecast.v4.gfs_grid_patch.")
     parser.add_argument("--output-dir", default="data/artifacts/g024_operational_performance")
+    parser.add_argument(
+        "--embed-images",
+        choices=sorted(EMBED_IMAGE_MODES),
+        default="thumbnail",
+        help="HTML plot handling: full base64 embed, thumbnail base64 links, or external image paths.",
+    )
     return parser
 
 
@@ -1654,6 +1931,7 @@ def main(argv: list[str] | None = None) -> None:
         station_metadata=args.station_metadata,
         output_dir=args.output_dir,
         grid_patch_features=args.grid_patch_features,
+        embed_images=args.embed_images,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
 

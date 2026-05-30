@@ -10,10 +10,20 @@ from typing import Any
 
 import pandas as pd
 
+from weather_korea_forecast.service.beta_sources import (
+    BETA_FORECAST_POINTS_SCHEMA_VERSION,
+    DIRECT_SOURCES,
+    descriptor_fields,
+    direct_source_for_provider,
+    normalize_probability_percent,
+    summarize_beta_targets_from_points,
+)
 from weather_korea_forecast.service.confidence import estimate_confidence
 from weather_korea_forecast.service.weather_code import weather_code_for_row
 
 BLOCKED_TOKENS = ("diagnostic", "oracle", "synthetic", "smoke", "fixture", "generated")
+PROVENANCE_SCAN_KEY_FRAGMENTS = ("source", "path", "uri", "url", "provenance", "artifact", "profile", "note", "run_id")
+PROVENANCE_POLICY_KEY_FRAGMENTS = ("policy", "gate", "threshold", "metric", "candidate")
 
 
 class ForecastExportError(ValueError):
@@ -38,19 +48,36 @@ def is_blocked_artifact(*values: Any) -> bool:
     return any(token in text for token in BLOCKED_TOKENS)
 
 
-def _walk_values(value: Any) -> list[Any]:
+def _is_provenance_key(key: Any) -> bool:
+    text = str(key).lower()
+    return any(fragment in text for fragment in PROVENANCE_SCAN_KEY_FRAGMENTS)
+
+
+def _is_policy_key(key: Any) -> bool:
+    text = str(key).lower()
+    return any(fragment in text for fragment in PROVENANCE_POLICY_KEY_FRAGMENTS)
+
+
+def _walk_values(value: Any, *, key: str = "", in_provenance_branch: bool = False) -> list[Any]:
     if isinstance(value, dict):
         walked: list[Any] = []
-        for key, nested in value.items():
-            walked.append(key)
-            walked.extend(_walk_values(nested))
+        for nested_key, nested in value.items():
+            if _is_policy_key(nested_key):
+                continue
+            next_in_provenance_branch = in_provenance_branch or _is_provenance_key(nested_key)
+            walked.extend(_walk_values(nested, key=str(nested_key), in_provenance_branch=next_in_provenance_branch))
         return walked
     if isinstance(value, (list, tuple, set)):
         walked = []
         for nested in value:
-            walked.extend(_walk_values(nested))
+            if isinstance(nested, dict):
+                walked.extend(_walk_values(nested, key=key, in_provenance_branch=in_provenance_branch))
+            elif in_provenance_branch:
+                walked.append(nested)
         return walked
-    return [value]
+    if in_provenance_branch or _is_provenance_key(key):
+        return [value]
+    return []
 
 
 def is_blocked_provenance(metadata: dict[str, Any]) -> bool:
@@ -153,7 +180,105 @@ def _first_existing(row: pd.Series, names: list[str], default: Any = None) -> An
     return default
 
 
-def _normalize_points(predictions: pd.DataFrame, station_meta: pd.DataFrame, *, forecast_run_id: str, model_version: str, source: str, operational_valid: bool, backtest_only: bool, temp_rmse: float | None, humidity_rmse: float | None) -> pd.DataFrame:
+def _first_existing_with_name(row: pd.Series, names: list[str], default: Any = None) -> tuple[str | None, Any]:
+    for name in names:
+        if name in row and pd.notna(row[name]):
+            return name, row[name]
+    return None, default
+
+
+def _trusted_ai_beta_targets(metadata: dict[str, Any] | None) -> set[str]:
+    if not isinstance(metadata, dict):
+        return set()
+    beta_targets = metadata.get("beta_targets") if isinstance(metadata.get("beta_targets"), dict) else {}
+    trusted: set[str] = set()
+    for target, payload in beta_targets.items():
+        descriptor = payload.get("descriptor", payload) if isinstance(payload, dict) else {}
+        if not isinstance(descriptor, dict):
+            continue
+        selection_reason = str(descriptor.get("selection_reason") or "")
+        validation_metrics = descriptor.get("validation_metrics")
+        if (
+            descriptor.get("source") == "ai_beta"
+            and descriptor.get("status") == "beta"
+            and ("validation" in selection_reason or bool(validation_metrics))
+        ):
+            trusted.add(str(target))
+    return trusted
+
+
+def _explicit_or_default_source(
+    row: pd.Series,
+    field: str,
+    default_source: str,
+    *,
+    trusted_ai_beta_targets: set[str] | None = None,
+) -> tuple[str, bool]:
+    explicit = _first_existing(row, [field])
+    if explicit in (None, ""):
+        return default_source, False
+    explicit_source = str(explicit)
+    target = field.removesuffix("_source")
+    if explicit_source == "ai_beta" and target not in (trusted_ai_beta_targets or set()):
+        return default_source, False
+    return explicit_source, True
+
+
+def _expected_status_for_source(source: str) -> str:
+    if source in DIRECT_SOURCES:
+        return "direct"
+    if source in {"ai_mos_model", "ai_mos"}:
+        return "model"
+    if source in {"ai_beta", "rule_based_beta", "ai_mos_model_beta", "ai_mos_beta"}:
+        return "beta"
+    return "unavailable"
+
+
+def _explicit_or_default_status(row: pd.Series, field: str, source: str, *, allow_explicit: bool = True) -> str | None:
+    explicit = _first_existing(row, [field])
+    expected = _expected_status_for_source(source)
+    if allow_explicit and explicit not in (None, "") and str(explicit) == expected:
+        return str(explicit)
+    return expected
+
+
+def _explicit_or_default_confidence(row: pd.Series, field: str) -> str | None:
+    explicit = _first_existing(row, [field])
+    return str(explicit) if explicit not in (None, "") else None
+
+
+def _source_fields(row: pd.Series, *, prefix: str, source: str, allow_explicit_metadata: bool = True) -> dict[str, str]:
+    status = _explicit_or_default_status(row, f"{prefix}_status", source, allow_explicit=allow_explicit_metadata)
+    confidence = _explicit_or_default_confidence(row, f"{prefix}_confidence") if allow_explicit_metadata else None
+    return descriptor_fields(prefix=prefix, source=source, status=status, confidence=confidence)
+
+
+def _beta_targets_from_points(points: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    if points.empty:
+        return {}
+    return summarize_beta_targets_from_points(points.to_dict(orient="records"))
+
+
+def _has_humidity_beta(points: pd.DataFrame) -> bool:
+    if points.empty or "humidity_source" not in points:
+        return False
+    beta_sources = {"ai_mos_model_beta", "ai_mos_beta", "ai_beta"}
+    return bool(points["humidity_source"].astype(str).isin(beta_sources).any())
+
+
+def _probability_input_unit(column_name: str | None) -> str:
+    normalized = str(column_name or "").lower()
+    if normalized in {"pop", "nwp_precip_probability", "kma_pop"}:
+        return "percent"
+    return "auto"
+
+
+def _append_warning_once(warnings: list[str], warning: str) -> None:
+    if warning not in warnings:
+        warnings.append(warning)
+
+
+def _normalize_points(predictions: pd.DataFrame, station_meta: pd.DataFrame, *, forecast_run_id: str, model_version: str, source: str, operational_valid: bool, backtest_only: bool, temp_rmse: float | None, humidity_rmse: float | None, trusted_ai_beta_targets: set[str] | None = None) -> pd.DataFrame:
     if "station_id" not in predictions.columns:
         raise ForecastExportError("predictions must include station_id")
     frame = predictions.copy()
@@ -166,6 +291,44 @@ def _normalize_points(predictions: pd.DataFrame, station_meta: pd.DataFrame, *, 
         valid_time = _first_existing(row, ["valid_time", "timestamp", "datetime"])
         temp = _first_existing(row, ["temperature_c", "temp", "prediction", "pred_temp", "nwp_t2m"])
         humidity = _first_existing(row, ["humidity_percent", "humidity", "pred_humidity"])
+        precip_probability_name, precip_probability_raw = _first_existing_with_name(row, ["precip_probability", "pop", "nwp_precip_probability"])
+        precip_probability = normalize_probability_percent(
+            precip_probability_raw,
+            input_unit=_probability_input_unit(precip_probability_name),
+        )
+        precip_source, precip_source_trusted = _explicit_or_default_source(
+            row,
+            "precip_probability_source",
+            direct_source_for_provider(source) if precip_probability is not None else "unavailable",
+            trusted_ai_beta_targets=trusted_ai_beta_targets,
+        )
+        wind_speed_name, wind_speed = _first_existing_with_name(row, ["wind_speed_ms", "wind_speed", "nwp_wind_speed"])
+        wind_direction = _first_existing(row, ["wind_direction_deg", "wind_dir", "nwp_wind_direction"])
+        wind_source, wind_source_trusted = _explicit_or_default_source(
+            row,
+            "wind_source",
+            direct_source_for_provider(source) if wind_speed is not None or wind_direction is not None or wind_speed_name is not None else "unavailable",
+            trusted_ai_beta_targets=trusted_ai_beta_targets,
+        )
+        cloud_name, cloud_cover = _first_existing_with_name(row, ["cloud_cover_percent", "cloud_cover", "nwp_cloud_cover"])
+        cloud_source, cloud_source_trusted = _explicit_or_default_source(
+            row,
+            "cloud_source",
+            direct_source_for_provider(source) if cloud_cover is not None or cloud_name is not None else "unavailable",
+            trusted_ai_beta_targets=trusted_ai_beta_targets,
+        )
+        temperature_source, temperature_source_trusted = _explicit_or_default_source(
+            row,
+            "temperature_source",
+            "ai_mos_model" if temp is not None else "unavailable",
+            trusted_ai_beta_targets=trusted_ai_beta_targets,
+        )
+        humidity_source, humidity_source_trusted = _explicit_or_default_source(
+            row,
+            "humidity_source",
+            "ai_mos_model_beta" if humidity is not None else "unavailable",
+            trusted_ai_beta_targets=trusted_ai_beta_targets,
+        )
         point = {
             "forecast_run_id": forecast_run_id,
             "station_id": str(row["station_id"]),
@@ -174,16 +337,20 @@ def _normalize_points(predictions: pd.DataFrame, station_meta: pd.DataFrame, *, 
             "lon": _first_existing(row, ["lon", "longitude", "lon_meta"]),
             "region_class": _first_existing(row, ["region_class", "region", "region_class_meta"], "unknown"),
             "valid_time": str(valid_time) if valid_time is not None else None,
+            "valid_date": _first_existing(row, ["valid_date", "forecast_valid_date", "date"]),
+            "forecast_day": _first_existing(row, ["forecast_day", "lead_day", "day_ahead"]),
             "horizon_step": int(float(horizon)) if horizon is not None else None,
             "temperature_c": temp,
+            "temp_max_c": _first_existing(row, ["temp_max_c", "temperature_max_c", "high_temperature_c"]),
+            "temp_min_c": _first_existing(row, ["temp_min_c", "temperature_min_c", "low_temperature_c"]),
             "humidity_percent": humidity,
             "dew_point_c": _first_existing(row, ["dew_point_c", "nwp_dew_point"]),
             "feels_like_c": _first_existing(row, ["feels_like_c"], temp),
-            "wind_speed_ms": _first_existing(row, ["wind_speed_ms", "wind_speed", "nwp_wind_speed"]),
-            "wind_direction_deg": _first_existing(row, ["wind_direction_deg", "wind_dir"]),
-            "precip_probability": _first_existing(row, ["precip_probability", "pop"]),
+            "wind_speed_ms": wind_speed,
+            "wind_direction_deg": wind_direction,
+            "precip_probability": precip_probability,
             "precip_mm": _first_existing(row, ["precip_mm", "precipitation", "nwp_tp"]),
-            "cloud_cover_percent": _first_existing(row, ["cloud_cover_percent", "cloud_cover", "nwp_cloud_cover"]),
+            "cloud_cover_percent": cloud_cover,
             "model_version": model_version,
             "data_source": source,
             "operational_valid": operational_valid,
@@ -200,6 +367,18 @@ def _normalize_points(predictions: pd.DataFrame, station_meta: pd.DataFrame, *, 
             humidity_beta=humidity is not None,
         )
         point.update(asdict(weather))
+        point.update(_source_fields(row, prefix="temperature", source=temperature_source, allow_explicit_metadata=temperature_source_trusted))
+        point.update(_source_fields(row, prefix="humidity", source=humidity_source, allow_explicit_metadata=humidity_source_trusted))
+        point.update(_source_fields(row, prefix="precip_probability", source=precip_source, allow_explicit_metadata=precip_source_trusted))
+        point.update(_source_fields(row, prefix="wind", source=wind_source, allow_explicit_metadata=wind_source_trusted))
+        point.update(_source_fields(row, prefix="cloud", source=cloud_source, allow_explicit_metadata=cloud_source_trusted))
+        weather_source, weather_source_trusted = _explicit_or_default_source(
+            row,
+            "weather_code_source",
+            "rule_based_beta",
+            trusted_ai_beta_targets=trusted_ai_beta_targets,
+        )
+        point.update(_source_fields(row, prefix="weather_code", source=weather_source, allow_explicit_metadata=weather_source_trusted))
         point.update(asdict(conf))
         rows.append(point)
     return pd.DataFrame(rows)
@@ -223,10 +402,12 @@ def export_forecast(
 ) -> ForecastExportResult:
     if is_blocked_artifact(predictions_path, source, notes, artifact_profile, forecast_run_id):
         raise ForecastExportError("diagnostic/oracle/synthetic/smoke/generated/fixture artifacts cannot be exported")
+    trusted_metadata = _load_json(trusted_experiment_summary_path) if trusted_experiment_summary_path is not None else {}
+    trusted_ai_beta_targets = _trusted_ai_beta_targets(trusted_metadata)
     if operational_valid is True or backtest_only is False:
         if trusted_experiment_summary_path is None:
             raise ForecastExportError("operational export requires --trusted-experiment-summary metadata")
-        trusted_source = _validate_operational_metadata(_load_json(trusted_experiment_summary_path))
+        trusted_source = _validate_operational_metadata(trusted_metadata)
         if source not in {"", "unknown", trusted_source}:
             raise ForecastExportError(f"operational export source {source!r} conflicts with trusted source {trusted_source!r}")
         source = trusted_source
@@ -250,9 +431,15 @@ def export_forecast(
         backtest_only=backtest_only,
         temp_rmse=temp_rmse,
         humidity_rmse=humidity_rmse,
+        trusted_ai_beta_targets=trusted_ai_beta_targets,
     )
     if points.empty:
         raise ForecastExportError("no forecast points produced")
+    humidity_beta = _has_humidity_beta(points)
+    if humidity_beta:
+        _append_warning_once(warnings, "humidity_beta: humidity output must be displayed as AI MOS beta")
+    if "weather_code_source" in points and points["weather_code_source"].astype(str).eq("rule_based_beta").any():
+        _append_warning_once(warnings, "weather_code_rule_based_beta: weather_code is rule-based beta")
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = output_dir / "runs" / run_id
     latest_dir = output_dir / "latest"
@@ -265,10 +452,13 @@ def export_forecast(
         "forecast_init_time": str(predictions.get("forecast_init_time", predictions.get("issue_time", pd.Series([None]))).iloc[0]),
         "created_at": datetime.now(UTC).isoformat(),
         "source": source,
+        "forecast_schema_version": BETA_FORECAST_POINTS_SCHEMA_VERSION,
         "operational_valid": operational_valid,
         "backtest_only": backtest_only,
+        "humidity_beta": humidity_beta,
         "horizon_hours": int(points["horizon_step"].max()),
-        "targets": ["temp", "humidity", "weather_code"],
+        "targets": ["temp", "humidity", "precip_probability", "wind", "cloud", "weather_code"],
+        "beta_targets": _beta_targets_from_points(points),
         "notes": notes,
         "warnings": warnings,
     }

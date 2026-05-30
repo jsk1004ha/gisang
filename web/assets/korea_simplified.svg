@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 700" role="img" aria-labelledby="title desc">
+  <title id="title">대한민국 단순 지도</title>
+  <desc id="desc">전국 예측 지점 표시를 위한 단순화된 대한민국 윤곽과 권역 경계</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#416996" flood-opacity="0.16"/>
+    </filter>
+    <linearGradient id="land" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef7ff"/>
+    </linearGradient>
+  </defs>
+  <g filter="url(#shadow)">
+    <path id="mainland" d="M265 36 C304 47 333 78 346 119 C359 159 351 190 370 221 C391 255 383 295 352 321 C330 340 326 371 344 403 C363 437 350 481 313 503 C282 522 261 547 253 584 C247 614 219 643 183 660 C153 634 150 596 166 568 C180 542 170 511 142 493 C111 473 101 433 122 402 C140 376 132 347 104 329 C70 307 68 263 99 237 C125 216 123 184 101 160 C72 128 86 83 124 66 C162 48 211 21 265 36 Z" fill="url(#land)" stroke="#9fb9d4" stroke-width="7" stroke-linejoin="round"/>
+    <path d="M199 113 C237 128 279 132 325 121" fill="none" stroke="#c7d9eb" stroke-width="4" stroke-linecap="round"/>
+    <path d="M142 197 C194 205 238 206 291 190 C322 181 346 189 365 209" fill="none" stroke="#c7d9eb" stroke-width="4" stroke-linecap="round"/>
+    <path d="M123 296 C173 288 211 299 247 319 C282 338 317 337 352 321" fill="none" stroke="#c7d9eb" stroke-width="4" stroke-linecap="round"/>
+    <path d="M140 409 C185 393 228 407 262 438 C283 457 310 466 342 456" fill="none" stroke="#c7d9eb" stroke-width="4" stroke-linecap="round"/>
+    <path d="M180 522 C213 507 246 520 280 547" fill="none" stroke="#c7d9eb" stroke-width="4" stroke-linecap="round"/>
+    <path d="M249 139 C233 197 231 252 248 319 C260 368 255 421 236 474" fill="none" stroke="#c7d9eb" stroke-width="4" stroke-linecap="round"/>
+    <path d="M301 219 C287 272 287 342 306 403" fill="none" stroke="#c7d9eb" stroke-width="4" stroke-linecap="round"/>
+    <path d="M109 621 C143 602 193 602 226 623 C190 651 143 652 109 621 Z" fill="url(#land)" stroke="#9fb9d4" stroke-width="6" stroke-linejoin="round"/>
+    <circle cx="82" cy="598" r="7" fill="#eef7ff" stroke="#b7cce3" stroke-width="3"/>
+    <circle cx="246" cy="642" r="5" fill="#eef7ff" stroke="#b7cce3" stroke-width="3"/>
+  </g>
+</svg>
