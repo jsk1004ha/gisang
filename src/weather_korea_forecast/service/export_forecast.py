@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 
@@ -19,6 +20,7 @@ from weather_korea_forecast.service.beta_sources import (
     summarize_beta_targets_from_points,
 )
 from weather_korea_forecast.service.confidence import estimate_confidence
+from weather_korea_forecast.service.forecast_snapshot import publish_forecast_run, validate_run_id
 from weather_korea_forecast.service.weather_code import weather_code_for_row
 
 BLOCKED_TOKENS = ("diagnostic", "oracle", "synthetic", "smoke", "fixture", "generated")
@@ -413,7 +415,11 @@ def export_forecast(
         source = trusted_source
         operational_valid = True
         backtest_only = False
-    run_id = forecast_run_id or f"forecast_{_utc_now_id()}"
+    run_id = forecast_run_id or f"forecast_{_utc_now_id()}_{uuid4().hex}"
+    try:
+        validate_run_id(run_id)
+    except ValueError as error:
+        raise ForecastExportError(str(error)) from error
     predictions = _read_frame(predictions_path)
     station_meta = _load_station_metadata(station_metadata_path)
     warnings: list[str] = []
@@ -444,7 +450,10 @@ def export_forecast(
     run_dir = output_dir / "runs" / run_id
     latest_dir = output_dir / "latest"
     archive_dir = output_dir / "archive"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise ForecastExportError(f"forecast run already exists and cannot be overwritten: {run_id}") from error
     archive_dir.mkdir(parents=True, exist_ok=True)
     run = {
         "forecast_run_id": run_id,
@@ -462,14 +471,16 @@ def export_forecast(
         "notes": notes,
         "warnings": warnings,
     }
-    for directory in (run_dir, latest_dir):
-        if directory == latest_dir and directory.exists():
-            shutil.rmtree(directory)
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "forecast_run.json").write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
-        points.to_json(directory / "forecast_points.json", orient="records", force_ascii=False, indent=2)
-        points.to_csv(directory / "forecast_points.csv", index=False)
-    shutil.copy2(run_dir / "forecast_run.json", archive_dir / f"{run_id}_forecast_run.json")
+    try:
+        (run_dir / "forecast_run.json").write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+        points.to_json(run_dir / "forecast_points.json", orient="records", force_ascii=False, indent=2)
+        points.to_csv(run_dir / "forecast_points.csv", index=False)
+        shutil.copy2(run_dir / "forecast_run.json", archive_dir / f"{run_id}_forecast_run.json")
+    except Exception:
+        # Only this unpublished run is disposable; published runs are immutable.
+        shutil.rmtree(run_dir)
+        raise
+    publish_forecast_run(run_dir, latest_dir)
     return ForecastExportResult(run_id, str(run_dir), str(latest_dir), len(points), warnings)
 
 

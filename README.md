@@ -107,6 +107,8 @@ G030에서 사이트 handoff용 모델 선택이 freeze되었고, G031은 모델
 - 습도: beta 표시 필요
 - 날씨 상태: rule-based beta 표시 필요
 - 웹/API는 `source`, `status`, `confidence`, `caveat` 정보를 숨기지 않는 방향입니다.
+- 운영 forecast pipeline은 모델 추론 결과인 `--predictions`를 필수로 받습니다. 예측 파일을 생략한 연구용 CSV 출력은 원시 direct 출처와 비운영 상태를 표시합니다.
+- 새 forecast는 불변 `runs/` 디렉터리를 완성한 뒤 `latest/current.json`을 원자적으로 교체합니다. API와 정적 웹은 이 포인터를 한 번 읽어 같은 run의 파일을 사용합니다. 평면 `latest/forecast_*` 파일의 호환 범위는 [출력 schema 문서](docs/FORECAST_OUTPUT_SCHEMA.md)에 설명합니다.
 
 ## 실행과 세부 사용법
 

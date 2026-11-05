@@ -456,10 +456,12 @@ const leafletState = {
   updatingBounds: false,
 };
 
-async function fetchJson(path) {
-  const response = await fetch(API_BASE + path);
+async function fetchJson(path, options) {
+  const response = await fetch(API_BASE + path, options);
   if (!response.ok) {
-    throw new Error(path);
+    const error = new Error(path);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -490,21 +492,60 @@ function embeddedModelStatusData() {
   return null;
 }
 
+async function fetchCurrentPointer(base) {
+  try {
+    return await fetchJson(`${base}latest/current.json`, { cache: "no-store" });
+  } catch (error) {
+    if (error.status === 404) return null;
+    throw error;
+  }
+}
+
+async function fetchStaticSnapshot(base, pointer) {
+  const runId = pointer && pointer.forecast_run_id;
+  if (pointer && (typeof runId !== "string" || !/^[A-Za-z0-9_.-]+$/.test(runId) || [".", ".."].includes(runId))) {
+    throw new Error("invalid current forecast pointer");
+  }
+  const directory = pointer ? `${base}runs/${runId}/` : `${base}latest/`;
+  const [run, payload] = await Promise.all([
+    fetchJson(`${directory}forecast_run.json`),
+    fetchJson(`${directory}forecast_points.json`),
+  ]);
+  const points = Array.isArray(payload) ? payload : payload.points || payload.forecast_points || [];
+  if (pointer && (run.forecast_run_id !== runId || points.some((point) => point.forecast_run_id && point.forecast_run_id !== runId))) {
+    throw new Error("forecast files belong to different runs");
+  }
+  return { run, points };
+}
+
+async function fetchStaticForecast() {
+  let lastError;
+  for (const base of ["data/forecasts/", "/data/forecasts/", "../data/forecasts/"]) {
+    try {
+      const pointer = await fetchCurrentPointer(base);
+      const snapshot = await fetchStaticSnapshot(base, pointer);
+      if (!pointer) {
+        // A legacy deployment may install its first pointer during these reads.
+        const published = await fetchCurrentPointer(base);
+        if (published) return await fetchStaticSnapshot(base, published);
+        if (snapshot.points.some((point) => point.forecast_run_id && point.forecast_run_id !== snapshot.run.forecast_run_id)) {
+          throw new Error("legacy forecast files belong to different runs");
+        }
+      }
+      return snapshot;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("static forecast unavailable");
+}
+
 async function fetchLatestForecast() {
   try {
     return await fetchJson("/api/forecast/latest");
   } catch (apiError) {
     try {
-      const run = await fetchFirstJson([
-        "data/forecasts/latest/forecast_run.json",
-        "/data/forecasts/latest/forecast_run.json",
-        "../data/forecasts/latest/forecast_run.json",
-      ]);
-      const points = await fetchFirstJson([
-        "data/forecasts/latest/forecast_points.json",
-        "/data/forecasts/latest/forecast_points.json",
-        "../data/forecasts/latest/forecast_points.json",
-      ]);
+      const { run, points } = await fetchStaticForecast();
       return {
         run,
         warnings: run.warnings || [],

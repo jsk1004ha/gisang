@@ -7,6 +7,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from weather_korea_forecast.service.beta_sources import summarize_beta_targets_from_points
+from weather_korea_forecast.service.forecast_snapshot import resolve_forecast_dir
 
 try:  # optional runtime dependency
     from fastapi import FastAPI
@@ -44,6 +45,18 @@ def _forecast_run(forecast_dir: Path = DEFAULT_FORECAST_DIR) -> dict[str, Any]:
 def _forecast_points(forecast_dir: Path = DEFAULT_FORECAST_DIR) -> list[dict[str, Any]]:
     payload = _read_json(forecast_dir / "forecast_points.json", [])
     return payload if isinstance(payload, list) else []
+
+
+def _forecast_snapshot(forecast_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    snapshot_dir = resolve_forecast_dir(forecast_dir)
+    run, points = _forecast_run(snapshot_dir), _forecast_points(snapshot_dir)
+    if snapshot_dir == forecast_dir:
+        # A first publication may have installed current while a legacy reader
+        # was reading flat files. Re-read the newly pinned immutable snapshot.
+        published_dir = resolve_forecast_dir(forecast_dir)
+        if published_dir != snapshot_dir:
+            run, points = _forecast_run(published_dir), _forecast_points(published_dir)
+    return run, points
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -184,21 +197,21 @@ def health() -> dict[str, Any]:
 
 def stations(forecast_dir: Path = DEFAULT_FORECAST_DIR) -> list[dict[str, Any]]:
     seen: dict[str, dict[str, Any]] = {}
-    for point in _forecast_points(forecast_dir):
+    _, points = _forecast_snapshot(forecast_dir)
+    for point in points:
         sid = str(point.get("station_id"))
         seen.setdefault(sid, {k: point.get(k) for k in ["station_id", "station_name", "lat", "lon", "region_class"]})
     return list(seen.values())
 
 
 def latest_forecast(forecast_dir: Path = DEFAULT_FORECAST_DIR) -> dict[str, Any]:
-    run = _forecast_run(forecast_dir)
-    points = _forecast_points(forecast_dir)
+    run, points = _forecast_snapshot(forecast_dir)
     return {"run": run, "warnings": _warnings(run), "points": points, "humidity_beta": _humidity_beta(run, points), "beta_targets": _beta_targets(run, points)}
 
 
 def station_forecast(station_id: str, forecast_dir: Path = DEFAULT_FORECAST_DIR) -> dict[str, Any]:
-    run = _forecast_run(forecast_dir)
-    points = [p for p in _forecast_points(forecast_dir) if str(p.get("station_id")) == str(station_id)]
+    run, points = _forecast_snapshot(forecast_dir)
+    points = [p for p in points if str(p.get("station_id")) == str(station_id)]
     return {"run": run, "warnings": _warnings(run), "station_id": str(station_id), "points": points, "humidity_beta": _humidity_beta(run, points), "beta_targets": _beta_targets(run, points)}
 
 
@@ -221,7 +234,7 @@ def model_status(
     reports_dir: Path = DEFAULT_REPORTS_DIR,
     manifest_path: Path | None = None,
 ) -> dict[str, Any]:
-    run = _forecast_run(forecast_dir)
+    run, points = _forecast_snapshot(forecast_dir)
     allow_default_manifest = (
         manifest_path is None
         and _same_path(forecast_dir, DEFAULT_FORECAST_DIR)
@@ -245,7 +258,6 @@ def model_status(
     manifest_operational_valid = _manifest_operational_valid(manifest) if manifest else None
     operational_valid = manifest_operational_valid if manifest_operational_valid is not None else run.get("operational_valid", False)
     warnings = [*_warnings(run), *_manifest_warnings(manifest)]
-    points = _forecast_points(forecast_dir)
     beta_targets = _beta_targets(run, points)
     humidity_beta = bool(manifest and (manifest.get("humidity_status") != "PASS")) or _humidity_beta(run, points)
     weather_code_rule_based_beta = bool(manifest and manifest.get("weather_code_model") == "rule_based_beta") or _target_has_source(beta_targets, "weather_code", "rule_based_beta")

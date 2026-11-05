@@ -21,6 +21,80 @@ def _run_node(script: str) -> str:
     return result.stdout
 
 
+def test_static_forecast_pins_current_once_during_publication() -> None:
+    script = r'''
+const assert = require("assert");
+const app = require("./web/app.js");
+let current = "run_a";
+let pointerReads = 0;
+const requests = [];
+global.fetch = async (path, options) => {
+  requests.push(path);
+  if (path === "data/forecasts/latest/current.json") {
+    pointerReads += 1;
+    assert.strictEqual(options.cache, "no-store");
+    return { ok: true, json: async () => ({ forecast_run_id: current }) };
+  }
+  if (path === "data/forecasts/runs/run_a/forecast_run.json") {
+    current = "run_b";
+    return { ok: true, json: async () => ({ forecast_run_id: "run_a" }) };
+  }
+  if (path === "data/forecasts/runs/run_a/forecast_points.json") {
+    return { ok: true, json: async () => [{ station_id: "108", forecast_run_id: "run_a", temperature_c: 1 }] };
+  }
+  return { ok: false, status: 404 };
+};
+(async () => {
+  const result = await app.fetchLatestForecast();
+  assert.strictEqual(result.run.forecast_run_id, "run_a");
+  assert.strictEqual(result.points[0].forecast_run_id, "run_a");
+  assert.strictEqual(pointerReads, 1);
+  assert.ok(!requests.includes("data/forecasts/latest/forecast_points.json"));
+  console.log("pinned static snapshot ok");
+})().catch((error) => { console.error(error); process.exit(1); });
+'''
+    assert "pinned static snapshot ok" in _run_node(script)
+
+
+def test_static_forecast_handles_legacy_and_first_pointer_publication() -> None:
+    script = r'''
+const assert = require("assert");
+const app = require("./web/app.js");
+let publishDuringRead = false;
+let published = false;
+global.fetch = async (path) => {
+  if (path === "data/forecasts/latest/current.json" && published) {
+    return { ok: true, json: async () => ({ forecast_run_id: "run_b" }) };
+  }
+  if (path === "data/forecasts/latest/forecast_run.json") {
+    return { ok: true, json: async () => ({ forecast_run_id: "run_a" }) };
+  }
+  if (path === "data/forecasts/latest/forecast_points.json") {
+    published = publishDuringRead;
+    return { ok: true, json: async () => [{ forecast_run_id: published ? "run_b" : "run_a" }] };
+  }
+  if (path === "data/forecasts/runs/run_b/forecast_run.json") {
+    return { ok: true, json: async () => ({ forecast_run_id: "run_b" }) };
+  }
+  if (path === "data/forecasts/runs/run_b/forecast_points.json") {
+    return { ok: true, json: async () => [{ forecast_run_id: "run_b" }] };
+  }
+  return { ok: false, status: 404 };
+};
+(async () => {
+  const legacy = await app.fetchLatestForecast();
+  assert.strictEqual(legacy.run.forecast_run_id, "run_a");
+  assert.strictEqual(legacy.points[0].forecast_run_id, "run_a");
+  publishDuringRead = true;
+  const migrated = await app.fetchLatestForecast();
+  assert.strictEqual(migrated.run.forecast_run_id, "run_b");
+  assert.strictEqual(migrated.points[0].forecast_run_id, "run_b");
+  console.log("legacy publication ok");
+})().catch((error) => { console.error(error); process.exit(1); });
+'''
+    assert "legacy publication ok" in _run_node(script)
+
+
 def _dom_smoke_script(body: str) -> str:
     return f"""
 const assert = require("assert");
@@ -534,11 +608,12 @@ def test_g032_static_guards_for_map_and_resilient_fetch() -> None:
     assert "return await fetchJson(\"/api/forecast/latest\")" in app_js
     assert "return await fetchJson(\"/api/model/status\")" in app_js
     assert "data/forecasts/latest/forecast_points.json" in app_js
-    assert "data/forecasts/latest/forecast_run.json" in app_js
+    assert "latest/current.json" in app_js
+    assert "runs/${runId}/" in app_js
     assert Path("web/data/forecasts/latest/forecast_points.json").exists()
     assert Path("web/data/forecasts/latest/forecast_run.json").exists()
     assert Path("web/data/forecasts/latest/forecast_data.js").exists()
-    assert "/data/forecasts/latest/forecast_points.json" in app_js
+    assert '"/data/forecasts/"' in app_js
     assert "/data/artifacts/g030_production_freeze_final/production_model_manifest.json" in app_js
     assert "const latest = await fetchLatestForecast()" in app_js
     assert "const modelStatus = await fetchModelStatus()" in app_js
