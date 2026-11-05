@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import pandas as pd
 
+from weather_korea_forecast.service.beta_sources import DIRECT_SOURCES, direct_source_for_provider
 from weather_korea_forecast.service.export_forecast import ForecastExportError, export_forecast, is_blocked_artifact, is_blocked_provenance
 
 
@@ -23,11 +25,11 @@ def _bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
-def _predictions_from_forecast_csv(forecast_csv: Path, output_dir: Path) -> Path:
+def _predictions_from_forecast_csv(forecast_csv: Path, work_dir: Path, *, source: str = "unknown") -> Path:
     frame = pd.read_csv(forecast_csv)
     if "station_id" not in frame.columns:
         raise ForecastExportError("forecast CSV must include station_id")
-    out = output_dir / "pipeline_work" / "forecast_csv_predictions.csv"
+    out = work_dir / "forecast_csv_predictions.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     mapped = pd.DataFrame()
     mapped["station_id"] = frame["station_id"]
@@ -44,6 +46,14 @@ def _predictions_from_forecast_csv(forecast_csv: Path, output_dir: Path) -> Path
         mapped["precip_probability"] = frame.get("precip_probability", frame.get("pop"))
     mapped["precip_mm"] = frame.get("nwp_tp")
     mapped["cloud_cover_percent"] = frame.get("nwp_cloud_cover")
+    # This path copies forecast inputs; it does not run a MOS model.
+    for prefix, value_column in (("temperature", "temperature_c"), ("humidity", "humidity_percent")):
+        explicit = frame.get(f"{prefix}_source", pd.Series(index=frame.index, dtype="object"))
+        mapped[f"{prefix}_source"] = explicit.where(explicit.isin(DIRECT_SOURCES | {"unavailable"}), direct_source_for_provider(source))
+        available = mapped[value_column].notna() & mapped[f"{prefix}_source"].ne("unavailable")
+        mapped.loc[~available, f"{prefix}_source"] = "unavailable"
+        mapped[f"{prefix}_status"] = available.map({True: "direct", False: "unavailable"})
+        mapped[f"{prefix}_confidence"] = available.map({True: "low", False: "unavailable"})
     for column in [
         "precip_probability_source",
         "precip_probability_status",
@@ -64,8 +74,8 @@ def _predictions_from_forecast_csv(forecast_csv: Path, output_dir: Path) -> Path
     return out
 
 
-def _prediction_path_for_export(*, predictions: Path | None, forecast_csv: Path, output_dir: Path) -> Path:
-    direct_path = _predictions_from_forecast_csv(forecast_csv, output_dir)
+def _prediction_path_for_export(*, predictions: Path | None, forecast_csv: Path, work_dir: Path, source: str = "unknown") -> Path:
+    direct_path = _predictions_from_forecast_csv(forecast_csv, work_dir, source=source)
     if predictions is None:
         return direct_path
     direct = pd.read_csv(direct_path, dtype={"station_id": str})
@@ -127,7 +137,7 @@ def _prediction_path_for_export(*, predictions: Path | None, forecast_csv: Path,
         else:
             merged[column] = merged[direct_column]
         merged = merged.drop(columns=[direct_column])
-    out = output_dir / "pipeline_work" / "merged_predictions_with_direct_fields.csv"
+    out = work_dir / "merged_predictions_with_direct_fields.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(out, index=False)
     return out
@@ -149,6 +159,8 @@ def run_forecast_pipeline(
     source = str(summary.get("future_feature_source") or summary.get("source") or "unknown")
     summary_path = experiment_dir / "experiment_summary.json"
     if operational:
+        if predictions is None:
+            raise ForecastExportError("operational mode requires --predictions from model inference; raw forecast CSV is only available in research mode")
         if not operational_valid or backtest_only:
             raise ForecastExportError("operational mode requires operational_valid=true and backtest_only=false model")
         if _bool(summary.get("forecast_source_schema_valid", summary.get("forecast_schema_valid"))) is not True:
@@ -159,20 +171,30 @@ def run_forecast_pipeline(
             raise ForecastExportError("operational mode blocks synthetic/smoke/diagnostic forecast sources")
     elif not research:
         raise ForecastExportError("pipeline requires either --operational or --research mode")
-    prediction_path = _prediction_path_for_export(predictions=predictions, forecast_csv=forecast_csv, output_dir=output_dir)
-    result = export_forecast(
-        predictions_path=prediction_path,
-        station_metadata_path=station_metadata,
-        output_dir=output_dir,
-        model_version=str(summary.get("experiment_name") or experiment_dir.name),
-        source=source,
-        operational_valid=operational_valid,
-        backtest_only=backtest_only,
-        notes=str(summary.get("notes") or ("research export" if research else "operational export")),
-        artifact_profile=str(summary.get("artifact_profile") or "full"),
-        temp_rmse=(summary.get("metrics") or {}).get("rmse"),
-        trusted_experiment_summary_path=summary_path if summary_path.exists() else None,
-    )
+    direct_only = predictions is None
+    notes = str(summary.get("notes") or ("research export" if research else "operational export"))
+    if direct_only:
+        operational_valid, backtest_only = False, True
+        notes += "; raw forecast CSV; no model predictions supplied"
+    work_root = output_dir / "pipeline_work"
+    work_root.mkdir(parents=True, exist_ok=True)
+    # Keep every intermediate private until the exporter has consumed it.
+    # TemporaryDirectory also removes these files when preparation/export fails.
+    with TemporaryDirectory(prefix="run-", dir=work_root) as temporary_dir:
+        prediction_path = _prediction_path_for_export(predictions=predictions, forecast_csv=forecast_csv, work_dir=Path(temporary_dir), source=source)
+        result = export_forecast(
+            predictions_path=prediction_path,
+            station_metadata_path=station_metadata,
+            output_dir=output_dir,
+            model_version="direct_forecast_csv" if direct_only else str(summary.get("experiment_name") or experiment_dir.name),
+            source=source,
+            operational_valid=operational_valid,
+            backtest_only=backtest_only,
+            notes=notes,
+            artifact_profile=str(summary.get("artifact_profile") or "full"),
+            temp_rmse=None if direct_only else (summary.get("metrics") or {}).get("rmse"),
+            trusted_experiment_summary_path=summary_path if summary_path.exists() else None,
+        )
     return {"status": "ok", **result.__dict__}
 
 
@@ -182,7 +204,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experiment-dir", required=True, type=Path)
     parser.add_argument("--station-metadata", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--predictions", type=Path)
+    parser.add_argument("--predictions", type=Path, help="Model inference output; required with --operational. Omit only for direct-input research export.")
     parser.add_argument("--operational", action="store_true")
     parser.add_argument("--research", action="store_true")
     return parser

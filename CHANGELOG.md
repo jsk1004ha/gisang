@@ -1,3 +1,10 @@
+## Forecast publication and provenance fixes
+
+- Require model predictions for operational pipeline exports; label raw research CSV values as direct forecasts without inheriting model validity or RMSE.
+- Publish immutable forecast runs through an atomic `latest/current.json` pointer and pin each API/static-web read to one run. Keep flat latest files as documented best-effort compatibility copies.
+- Isolate each pipeline invocation's intermediate CSVs so concurrent runs sharing an output directory retain their own input values.
+- Cover failed and concurrent publication, legacy migration, run-ID collisions, and direct-source provenance with regression tests.
+
 ## G031 - Website Finalization
 
 - Completed the site-only MVP handoff around the frozen G030 manifest and `forecast_points.v2-beta-sources` schema.
