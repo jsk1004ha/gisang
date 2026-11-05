@@ -31,6 +31,8 @@ Read this pointer once, then read all required files from `runs/{forecast_run_id
 
 The flat files in `latest/` are retained for older/offline consumers and refreshed individually with atomic file replacement after the pointer commits. They are best-effort compatibility copies: multiple flat files are **not** one atomic snapshot, and concurrent publishers or a compatibility-copy failure can leave them stale or from different runs. Consumers requiring consistency must use `current.json` or the API. A compatibility-copy failure emits a warning without undoing the committed complete run. Legacy directories without a pointer remain readable; when the first pointer appears during a legacy read, the API/web reader switches to that complete run.
 
+Atomic replacements preserve each existing destination file's permission mode. A new `current.json` inherits the run metadata file's mode; new compatibility files inherit their respective run files' modes. This preserves the configured POSIX read bits for an API/static-server account without changing the process umask or forcing broader permissions.
+
 ### Pipeline input provenance
 
 `run_forecast_pipeline --operational` requires explicit `--predictions` from model inference as well as the existing trusted metadata gates. It never silently substitutes raw forecast values for model output.

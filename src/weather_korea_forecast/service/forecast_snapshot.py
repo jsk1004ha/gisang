@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import tempfile
 import warnings
 from pathlib import Path
@@ -34,13 +35,20 @@ def resolve_forecast_dir(forecast_dir: Path) -> Path:
     return run_dir
 
 
-def _atomic_write(path: Path, content: bytes) -> None:
+def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
+    # Replacements keep the destination's permissions. New files inherit the
+    # caller's source mode, which already reflects its creation umask.
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        pass
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as temporary:
             temporary_path = Path(temporary.name)
             temporary.write(content)
             temporary.flush()
+            os.chmod(temporary_path, mode)
             os.fsync(temporary.fileno())
         os.replace(temporary_path, path)
     finally:
@@ -56,12 +64,14 @@ def publish_forecast_run(run_dir: Path, latest_dir: Path) -> None:
     """
     latest_dir.mkdir(parents=True, exist_ok=True)
     pointer = json.dumps({"forecast_run_id": run_dir.name}, ensure_ascii=False).encode("utf-8")
-    _atomic_write(latest_dir / "current.json", pointer)
+    metadata_mode = stat.S_IMODE((run_dir / "forecast_run.json").stat().st_mode)
+    _atomic_write(latest_dir / "current.json", pointer, mode=metadata_mode)
     try:
         # A second publisher may already have committed a newer complete run.
         current_dir = resolve_forecast_dir(latest_dir)
         for filename in FORECAST_FILES:
-            _atomic_write(latest_dir / filename, (current_dir / filename).read_bytes())
+            source = current_dir / filename
+            _atomic_write(latest_dir / filename, source.read_bytes(), mode=stat.S_IMODE(source.stat().st_mode))
     except OSError as error:
         warnings.warn(
             f"Forecast current.json was published; legacy flat files could not all be refreshed: {error}",

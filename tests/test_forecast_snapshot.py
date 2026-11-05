@@ -1,5 +1,7 @@
 import importlib
 import json
+import os
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -32,6 +34,47 @@ def _assert_snapshot(payload, run_id):
     assert payload["run"]["forecast_run_id"] == run_id
     assert payload["points"]
     assert {point["forecast_run_id"] for point in payload["points"]} == {run_id}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file permission modes")
+def test_new_publication_inherits_source_file_modes(publish):
+    result = publish("run_a")
+    run_dir = Path(result.run_dir)
+    latest = Path(result.latest_dir).with_name("new_latest")
+    source_modes = {
+        "forecast_run.json": 0o640,
+        "forecast_points.json": 0o600,
+        "forecast_points.csv": 0o644,
+    }
+    for filename, mode in source_modes.items():
+        (run_dir / filename).chmod(mode)
+
+    forecast_snapshot.publish_forecast_run(run_dir, latest)
+
+    assert stat.S_IMODE((latest / "current.json").stat().st_mode) == source_modes["forecast_run.json"]
+    for filename, mode in source_modes.items():
+        assert stat.S_IMODE((latest / filename).stat().st_mode) == mode
+    _assert_snapshot(api.latest_forecast(latest), "run_a")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file permission modes")
+def test_publication_preserves_existing_file_modes(publish):
+    result = publish("run_a")
+    latest = Path(result.latest_dir)
+    existing_modes = {
+        "current.json": 0o600,
+        "forecast_run.json": 0o644,
+        "forecast_points.json": 0o640,
+        "forecast_points.csv": 0o600,
+    }
+    for filename, mode in existing_modes.items():
+        (latest / filename).chmod(mode)
+
+    publish("run_b", temperature=2)
+
+    for filename, mode in existing_modes.items():
+        assert stat.S_IMODE((latest / filename).stat().st_mode) == mode
+    _assert_snapshot(api.latest_forecast(latest), "run_b")
 
 
 @pytest.mark.parametrize("failure", ["points", "pointer"])
@@ -133,10 +176,10 @@ def test_overlapping_publishers_only_expose_complete_runs(publish, monkeypatch):
     original_replace = forecast_snapshot.os.replace
     observations = []
 
-    def overlap_at_commit(path, content):
+    def overlap_at_commit(path, content, *, mode):
         if path.name == "current.json":
             ready.wait(timeout=5)
-        return original_write(path, content)
+        return original_write(path, content, mode=mode)
 
     def observe_publication(source, destination):
         result = original_replace(source, destination)
